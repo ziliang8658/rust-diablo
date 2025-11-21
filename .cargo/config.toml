@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-L", "F:/SDL2-2.28.3/lib/x64"
+]
+
