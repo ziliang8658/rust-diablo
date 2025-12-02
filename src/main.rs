@@ -11,6 +11,9 @@ mod entity;
 mod world;
 mod sprite;
 mod assets;
+mod resources;
+mod tiles;  // Step 6.1: Tiles system
+mod levels; // Step 6.3: Dungeon generation
 
 use anyhow::Result;
 use game::Game;
@@ -23,6 +26,14 @@ pub fn run_game() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    println!("=== Rust Diablo - Step 6.1: Tiles System Demo ===");
+    println!("Controls:");
+    println!("  WASD / Arrow Keys - Move");
+    println!("  ESC - Quit");
+    println!("  F1 - Cathedral Dungeon (Step 6.1 Tiles System)");
+    println!("  F2 - Town Preview (Step 5.3)");
+    println!("===============================================\n");
+    
     run_game()
 }
 

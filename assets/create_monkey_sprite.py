@@ -182,3 +182,9 @@ print(f"  - Frame 3 (128-191): Monkey on cloud (walk 2)")
 print(f"  - Frame 4 (192-255): Monkey on cloud (walk 3)")
 
 
+
+
+
+
+
+

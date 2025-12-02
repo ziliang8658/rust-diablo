@@ -8,15 +8,19 @@
 
 // Sub-modules
 pub mod direction;
+pub mod isometric;
+pub mod tile_renderer;
 
 // Re-exports
 pub use direction::Direction;
+pub use isometric::*;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use sdl2::Sdl;
 use sdl2::render::{TextureCreator, Texture as SdlTexture};
 use sdl2::video::WindowContext;
 use sdl2::image::LoadTexture;
+use sdl2::pixels::PixelFormatEnum;
 use crate::math::{Point, Rect};
 use crate::renderer::Color;
 use crate::sprite::TextureManager;
@@ -57,6 +61,13 @@ impl Engine {
             .position_centered()
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create window: {}", e))?;
+        
+        // Set texture filtering to nearest (pixel-perfect) to avoid seams
+        // Reference: C++ uses SDL_HINT_RENDER_SCALE_QUALITY="0" (nearest) or "1" (linear)
+        // Source/utils/display.cpp::ReinitializeTexture() Line 708-709
+        // This must be set BEFORE creating the renderer/canvas
+        sdl2::hint::set("SDL_RENDER_SCALE_QUALITY", "0");
+
         
         // Create canvas for rendering
         let mut canvas = window
@@ -104,6 +115,323 @@ impl Engine {
         &mut self.texture_manager
     }
 
+    /// Create SDL texture from CLX frame
+    /// 
+    /// Converts a ClxFrame's indexed pixel data into an SDL texture using a palette.
+    /// Used for loading dungeon tile textures from CEL files.
+    /// 
+    /// # Arguments
+    /// * `frame` - CLX frame containing indexed color data
+    /// * `palette` - Palette to use for color conversion
+    /// 
+    /// # Returns
+    /// SDL texture ready for rendering
+    pub fn create_texture_from_clx_frame(
+        &mut self, 
+        frame: &crate::resources::ClxFrame,
+        palette: &crate::resources::Palette
+    ) -> Result<SdlTexture> {
+        let width = frame.width as u32;
+        let height = frame.height as u32;
+        
+        // Create texture
+        let mut texture = self.texture_creator
+            .create_texture_static(
+                PixelFormatEnum::RGBA8888,
+                width,
+                height
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create texture: {}", e))?;
+        
+        // Convert indexed pixel data to RGBA using palette
+        let mut rgba_data = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let src_idx = (y * width + x) as usize;
+                let dst_idx = src_idx * 4;
+                
+                if src_idx < frame.pixels.len() {
+                    if let Some(palette_index) = frame.pixels[src_idx] {
+                        // Get color from palette
+                        let color = palette.to_rgb(palette_index);
+                        rgba_data[dst_idx] = color.r;
+                        rgba_data[dst_idx + 1] = color.g;
+                        rgba_data[dst_idx + 2] = color.b;
+                        rgba_data[dst_idx + 3] = 255; // Opaque
+                    } else {
+                        // Transparent pixel
+                        rgba_data[dst_idx] = 0;
+                        rgba_data[dst_idx + 1] = 0;
+                        rgba_data[dst_idx + 2] = 0;
+                        rgba_data[dst_idx + 3] = 0;
+                    }
+                }
+            }
+        }
+        
+        // Update texture
+        texture.update(None, &rgba_data, (width * 4) as usize)
+            .map_err(|e| anyhow::anyhow!("Failed to update texture: {}", e))?;
+        
+        // Set blend mode for transparency
+        texture.set_blend_mode(sdl2::render::BlendMode::Blend);
+        
+        Ok(texture)
+    }
+
+    /// Create a texture from raw RGBA data
+    /// 
+    /// # Arguments
+    /// * `rgba_data` - RGBA pixel data (4 bytes per pixel)
+    /// * `width` - Texture width
+    /// * `height` - Texture height
+    /// 
+    /// # Returns
+    /// SDL texture ready for rendering
+    pub fn create_texture_from_rgba(
+        &mut self,
+        rgba_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<SdlTexture> {
+        if rgba_data.len() != (width * height * 4) as usize {
+            return Err(anyhow::anyhow!(
+                "RGBA data size mismatch: expected {}, got {}",
+                width * height * 4,
+                rgba_data.len()
+            ));
+        }
+        
+        let mut texture = self.texture_creator
+            .create_texture_static(
+                PixelFormatEnum::RGBA8888,
+                width,
+                height
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create texture: {}", e))?;
+        
+        texture.update(None, rgba_data, (width * 4) as usize)
+            .map_err(|e| anyhow::anyhow!("Failed to update texture: {}", e))?;
+        
+        texture.set_blend_mode(sdl2::render::BlendMode::Blend);
+        
+        Ok(texture)
+    }
+    
+    /// Draw RGBA texture data directly to screen
+    /// 
+    /// Creates a temporary texture from RGBA data and draws it immediately.
+    /// For frequently used tiles, consider pre-caching.
+    /// 
+    /// # Arguments
+    /// * `_texture_id` - Unused (for future caching)
+    /// * `rgba_data` - RGBA pixel data (4 bytes per pixel)
+    /// * `width` - Texture width
+    /// * `height` - Texture height
+    /// * `dst_rect` - Destination rectangle on screen
+    pub fn draw_rgba_texture(
+        &mut self,
+        texture_id: &str,
+        rgba_data: &[u8],
+        width: u32,
+        height: u32,
+        dst_rect: crate::math::Rect,
+    ) -> Result<bool> {
+        if rgba_data.len() != (width * height * 4) as usize {
+            return Err(anyhow::anyhow!(
+                "RGBA data size mismatch: expected {}, got {}",
+                width * height * 4,
+                rgba_data.len()
+            ));
+        }
+        
+        let sdl_rect = sdl2::rect::Rect::new(
+            dst_rect.x,
+            dst_rect.y,
+            dst_rect.width,
+            dst_rect.height,
+        );
+        
+        // Create new texture
+        // Note: Texture filtering is set at renderer level via SDL_HINT_RENDER_SCALE_QUALITY
+        // which was set in Engine::new() before creating the canvas
+        let mut sdl_texture = self.texture_creator
+            .create_texture_static(
+                PixelFormatEnum::ABGR8888,
+                width,
+                height
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create texture: {}", e))?;
+
+        sdl_texture.update(None, rgba_data, (width * 4) as usize)
+            .map_err(|e| anyhow::anyhow!("Failed to update texture: {}", e))?;
+        
+        // For Solid tiles (floors), use None blend mode (opaque) like C++ BlitPixelsDirect
+        // For Transparent tiles, use Blend mode
+        // Reference: Source/engine/render/dun_render.cpp::RenderLineOpaque() Line 130-135
+        // C++ uses BlitPixelsDirect (no blending) for Solid mask type
+        // This prevents transparent edge pixels from blending and creating visible seams
+        sdl_texture.set_blend_mode(sdl2::render::BlendMode::Blend);
+
+        // Draw with both horizontal and vertical flip (like player tddddextures)
+        // SDL Y-axis is top-to-bottom, but Diablo tile data is bottom-to-top
+        // SDL X-axis may also need flipping depending on tile orientation
+        // Reference: rust-diablo/src/resources/clx.rs:118-129 - CLX format flips Y-axis
+        self.canvas.copy_ex(
+            &sdl_texture,
+            None,
+            sdl_rect,
+            0.0,
+            None,
+            true,   // flip_h - horizontal flip for tile textures
+            true,   // flip_v - vertical flip for tile textures
+        )
+            .map_err(|e| anyhow::anyhow!("Failed to copy texture: {}", e))?;
+        
+        Ok(true)
+    }
+    
+    /// Register multiple CEL tile textures in batch
+    /// 
+    /// Creates and registers SDL textures for all frames in a CEL tileset.
+    /// This method avoids borrow checker issues by handling all textures in one call.
+    /// 
+    /// # Arguments
+    /// * `frames` - Vector of CLX frames from CEL file
+    /// * `palette` - Palette to use for color conversion
+    /// * `id_prefix` - Prefix for texture IDs (e.g. "tile_" results in "tile_0", "tile_1", etc.)
+    /// 
+    /// # Returns
+    /// Number of textures successfully registered
+    pub fn register_cel_textures(
+        &mut self,
+        frames: &[crate::resources::ClxFrame],
+        palette: &crate::resources::Palette,
+        id_prefix: &str,
+    ) -> Result<usize> {
+        use crate::sprite::Texture;
+        
+        let mut registered_count = 0;
+        
+        for (i, frame) in frames.iter().enumerate() {
+            let texture_id = format!("{}{}", id_prefix, i);
+            let width = frame.width as u32;
+            let height = frame.height as u32;
+            
+            // Create texture directly (inline to avoid borrow checker issues)
+            let texture_result = (|| -> Result<SdlTexture> {
+                let mut texture = self.texture_creator
+                    .create_texture_static(
+                        PixelFormatEnum::RGBA8888,
+                        width,
+                        height
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to create texture: {}", e))?;
+                
+                // Convert indexed pixel data to RGBA using palette
+                let mut rgba_data = vec![0u8; (width * height * 4) as usize];
+                for y in 0..height {
+                    for x in 0..width {
+                        let src_idx = (y * width + x) as usize;
+                        let dst_idx = src_idx * 4;
+                        
+                        if src_idx < frame.pixels.len() {
+                            if let Some(palette_index) = frame.pixels[src_idx] {
+                                let color = palette.to_rgb(palette_index);
+                                rgba_data[dst_idx] = color.r;
+                                rgba_data[dst_idx + 1] = color.g;
+                                rgba_data[dst_idx + 2] = color.b;
+                                rgba_data[dst_idx + 3] = 255;
+                            } else {
+                                // Transparent pixel
+                                rgba_data[dst_idx] = 0;
+                                rgba_data[dst_idx + 1] = 0;
+                                rgba_data[dst_idx + 2] = 0;
+                                rgba_data[dst_idx + 3] = 0;
+                            }
+                        }
+                    }
+                }
+                
+                texture.update(None, &rgba_data, (width * 4) as usize)
+                    .map_err(|e| anyhow::anyhow!("Failed to update texture: {}", e))?;
+                
+                texture.set_blend_mode(sdl2::render::BlendMode::Blend);
+                
+                Ok(texture)
+            })();
+            
+            match texture_result {
+                Ok(texture) => {
+                    let query = texture.query();
+                    
+                    // Register texture in texture manager
+                    unsafe {
+                        let texture_wrapper = Texture {
+                            texture: std::mem::transmute::<SdlTexture, SdlTexture<'static>>(texture),
+                            width: query.width,
+                            height: query.height,
+                        };
+                        self.texture_manager.textures.insert(texture_id, texture_wrapper);
+                    }
+                    
+                    registered_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to create texture for frame {}: {}", i, e);
+                }
+            }
+        }
+        
+        Ok(registered_count)
+    }
+
+    /// Load PNG tiles directly as textures (without palette conversion)
+    /// 
+    /// This preserves the original RGB colors from PNG files.
+    /// 
+    /// # Arguments
+    /// * `folder_path` - Path to folder containing tile_0.png, tile_1.png, etc.
+    /// * `id_prefix` - Prefix for texture IDs (e.g. "tile_")
+    /// 
+    /// # Returns
+    /// Number of textures registered
+    pub fn register_png_tile_textures(&mut self, folder_path: &str, id_prefix: &str) -> Result<usize> {
+        use std::path::Path;
+        
+        let folder = Path::new(folder_path);
+        let mut registered_count = 0;
+        let mut index = 0;
+        
+        loop {
+            let tile_path = folder.join(format!("tile_{}.png", index));
+            
+            if !tile_path.exists() {
+                break;
+            }
+            
+            let texture_id = format!("{}{}", id_prefix, index);
+            
+            // Load PNG directly as SDL texture
+            match self.load_texture(&texture_id, tile_path.to_str().unwrap()) {
+                Ok(()) => {
+                    registered_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load tile {}: {}", index, e);
+                }
+            }
+            
+            index += 1;
+        }
+        
+        if registered_count == 0 {
+            bail!("No tile PNG files found in folder: {}", folder_path);
+        }
+        
+        Ok(registered_count)
+    }
+
     /// Load a texture using the texture creator directly
     /// This ensures we use the texture_creator from Engine, not from TextureManager
     /// The texture_creator is created from canvas and should have a valid renderer
@@ -130,6 +458,61 @@ impl Engine {
             (*texture_manager_ptr).textures.insert(id.to_string(), texture_wrapper);
         }
         
+        Ok(())
+    }
+
+    /// Load a texture from RGBA pixel data
+    /// 
+    /// This method creates a texture from raw RGBA pixel data (4 bytes per pixel).
+    /// Used for loading PCX and CLX resources converted to RGBA format.
+    pub fn load_texture_from_rgba(
+        &mut self, 
+        id: &str, 
+        rgba_data: &[u8], 
+        width: u32, 
+        height: u32
+    ) -> Result<()> {
+        // Verify data size
+        let expected_size = (width * height * 4) as usize;
+        if rgba_data.len() != expected_size {
+            return Err(anyhow::anyhow!(
+                "Invalid RGBA data size: expected {} bytes, got {} bytes",
+                expected_size,
+                rgba_data.len()
+            ));
+        }
+
+        // Create a streaming texture
+        let mut texture = self.texture_creator
+            .create_texture_streaming(PixelFormatEnum::RGBA32, width, height)
+            .map_err(|e| anyhow::anyhow!("Failed to create texture: {}", e))?;
+
+        // Enable alpha blending for transparency
+        texture.set_blend_mode(sdl2::render::BlendMode::Blend);
+
+        // Write RGBA data to texture
+        texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
+            for y in 0..height as usize {
+                let src_offset = y * width as usize * 4;
+                let dst_offset = y * pitch;
+                let row_size = width as usize * 4;
+                buffer[dst_offset..dst_offset + row_size]
+                    .copy_from_slice(&rgba_data[src_offset..src_offset + row_size]);
+            }
+        }).map_err(|e| anyhow::anyhow!("Failed to write texture data: {}", e))?;
+
+        // Store in texture manager
+        unsafe {
+            use crate::sprite::Texture;
+            let texture_wrapper = Texture {
+                texture: std::mem::transmute::<SdlTexture, SdlTexture<'static>>(texture),
+                width,
+                height,
+            };
+            let texture_manager_ptr = &mut self.texture_manager as *mut TextureManager<'static>;
+            (*texture_manager_ptr).textures.insert(id.to_string(), texture_wrapper);
+        }
+
         Ok(())
     }
 
@@ -177,16 +560,115 @@ impl Engine {
         Ok(())
     }
 
+    /// Draw a filled diamond (isometric tile shape)
+    /// 
+    /// Draws a filled diamond centered at the given point.
+    /// The diamond has width TILE_WIDTH (64px) and height TILE_HEIGHT (32px).
+    /// 
+    /// # Arguments
+    /// * `center` - Center point of the diamond
+    /// * `color` - Fill color
+    /// 
+    /// # Diamond vertices (for 64x32 tile):
+    /// ```text
+    ///       top (cx, cy-16)
+    ///        *
+    ///       / \
+    ///      /   \
+    /// left     right
+    /// (cx-32,cy) (cx+32,cy)
+    ///      \   /
+    ///       \ /
+    ///        *
+    ///     bottom (cx, cy+16)
+    /// ```
+    /// 
+    /// # Reference
+    /// Original code: `Source/automap.cpp::DrawDiamond()` (Line 165-171)
+    pub fn draw_diamond(&mut self, center: Point, color: Color) -> Result<()> {
+        use crate::engine::isometric::{TILE_WIDTH, TILE_HEIGHT};
+        
+        let half_width = (TILE_WIDTH / 2) as i32;
+        let half_height = (TILE_HEIGHT / 2) as i32;
+        
+        self.canvas.set_draw_color(color.to_sdl());
+        
+        // 上半部分：从顶点到中线
+        for i in 0..=half_height {
+            let y = center.y - half_height + i;
+            let width = (i * 2) as i32;
+            let x_start = center.x - width;
+            let x_end = center.x + width;
+            
+            // 使用draw_line绘制水平线（更高效）
+            if x_start <= x_end {
+                self.canvas.draw_line(
+                    (x_start, y),
+                    (x_end, y)
+                ).map_err(|e| anyhow::anyhow!("Failed to draw diamond line: {}", e))?;
+            }
+        }
+        
+        // 下半部分：从中线到底点
+        for i in 1..=half_height {
+            let y = center.y + i;
+            let width = half_width - (i * 2);
+            let x_start = center.x - width;
+            let x_end = center.x + width;
+            
+            if x_start <= x_end {
+                self.canvas.draw_line(
+                    (x_start, y),
+                    (x_end, y)
+                ).map_err(|e| anyhow::anyhow!("Failed to draw diamond line: {}", e))?;
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Draw a diamond outline (isometric tile shape)
+    ///
+    /// Draws only the outline of a diamond using 4 lines.
+    /// This matches the original DrawDiamond implementation.
+    ///
+    /// # Arguments
+    /// * `center` - Center point of the diamond
+    /// * `color` - Line color
+    ///
+    /// # Reference
+    /// Original code: `Source/automap.cpp::DrawDiamond()` (Line 165-171)
+    pub fn draw_diamond_outline(&mut self, center: Point, color: Color) -> Result<()> {
+        use crate::engine::isometric::{TILE_WIDTH, TILE_HEIGHT};
+
+        let half_width = (TILE_WIDTH / 2) as i32;   // 32
+        let half_height = (TILE_HEIGHT / 2) as i32; // 16
+
+        // 4个顶点
+        let top = Point::new(center.x, center.y - half_height);
+        let bottom = Point::new(center.x, center.y + half_height);
+        let left = Point::new(center.x - half_width, center.y);
+        let right = Point::new(center.x + half_width, center.y);
+
+        // 4条边
+        self.draw_line(left, top, color)?;      // 左上边
+        self.draw_line(left, bottom, color)?;   // 左下边
+        self.draw_line(top, right, color)?;     // 右上边
+        self.draw_line(bottom, right, color)?;  // 右下边
+
+        Ok(())
+    }
+
     /// Draw a texture at a position
     pub fn draw_texture(
-        &mut self, 
-        texture: &SdlTexture, 
-        src: Option<Rect>, 
+        &mut self,
+        texture: &SdlTexture,
+        src: Option<Rect>,
         dst: Rect
     ) -> Result<()> {
         let src_sdl = src.map(|r| r.to_sdl());
         let dst_sdl = dst.to_sdl();
-        
+
         self.canvas.copy(texture, src_sdl, dst_sdl)
             .map_err(|e| anyhow::anyhow!("Failed to draw texture: {}", e))?;
         Ok(())
@@ -194,7 +676,7 @@ impl Engine {
 
     /// Draw a texture by ID from the texture manager
     /// This method avoids borrow conflicts by internally accessing the texture manager
-    /// 
+    ///
     /// Safety: We use unsafe to extend the texture reference lifetime because textures
     /// are valid for the entire lifetime of the Engine (they're owned by texture_creator
     /// which lives as long as the Engine).
@@ -204,17 +686,40 @@ impl Engine {
         src: Option<Rect>,
         dst: Rect,
     ) -> Result<bool> {
+        // DEBUG: Print first few texture lookups
+        static mut LOOKUP_COUNT: usize = 0;
+        unsafe {
+            LOOKUP_COUNT += 1;
+            if LOOKUP_COUNT <= 10 {
+                println!("  [draw_texture_by_id] Looking for: '{}'", texture_id);
+            }
+        }
+
         // Get texture reference and convert to static lifetime using raw pointer
         // Safety: Textures are valid for the entire lifetime of Engine because
         // they're owned by texture_creator which lives as long as Engine.
         let texture_ptr_opt: Option<*const SdlTexture> = {
             let texture_mgr = self.texture_manager();
+
+            // DEBUG: Check if texture exists
+            unsafe {
+                if LOOKUP_COUNT <= 10 {
+                    if texture_mgr.contains(texture_id) {
+                        println!("    ✓ Texture found in manager");
+                    } else {
+                        println!("    ✗ Texture NOT found in manager");
+                        println!("    Available textures: {:?}",
+                            texture_mgr.textures.keys().take(5).collect::<Vec<_>>());
+                    }
+                }
+            }
+
             texture_mgr.get(texture_id).map(|t| {
                 // Get raw pointer to the texture
                 t.sdl_texture() as *const SdlTexture
             })
         };
-        
+
         if let Some(texture_ptr) = texture_ptr_opt {
             // Safety: The texture is valid because:
             // 1. It's owned by texture_creator which lives as long as Engine
@@ -245,7 +750,7 @@ impl Engine {
     ) -> Result<()> {
         let src_sdl = src.map(|r| r.to_sdl());
         let dst_sdl = dst.to_sdl();
-        
+
         self.canvas.copy_ex(
             texture,
             src_sdl,
@@ -255,7 +760,7 @@ impl Engine {
             flip_h,
             flip_v,
         ).map_err(|e| anyhow::anyhow!("Failed to draw texture: {}", e))?;
-        
+
         Ok(())
     }
 

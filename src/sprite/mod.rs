@@ -10,6 +10,5 @@ pub mod sprite;
 pub mod animation;
 
 pub use texture::{Texture, TextureManager};
-pub use sprite::Sprite;
 pub use animation::{Animation, AnimationState, AnimationController};
 

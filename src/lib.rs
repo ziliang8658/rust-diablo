@@ -9,4 +9,7 @@ pub mod entity;
 pub mod world;
 pub mod sprite;
 pub mod assets;
+pub mod resources;
+pub mod tiles;
+pub mod levels;
 

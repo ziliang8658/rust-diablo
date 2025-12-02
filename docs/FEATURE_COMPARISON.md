@@ -6,9 +6,9 @@
 
 | 主系统 | 原版文件数 | 已实现 | 进行中 | 未开始 | 完成度 |
 |--------|-----------|--------|--------|--------|--------|
-| **核心引擎** | 67 | 3 | 0 | 64 | 4% |
-| **资源系统** | 15 | 1 | 0 | 14 | 7% |
-| **渲染系统** | 12 | 2 | 0 | 10 | 17% |
+| **核心引擎** | 67 | 5 | 0 | 62 | 7% |
+| **资源系统** | 15 | 8 | 0 | 7 | 53% |
+| **渲染系统** | 12 | 3 | 0 | 9 | 25% |
 | **玩家系统** | 5 | 1 | 0 | 4 | 20% |
 | **怪物系统** | 6 | 0 | 0 | 6 | 0% |
 | **物品系统** | 6 | 0 | 0 | 6 | 0% |
@@ -19,7 +19,11 @@
 | **脚本系统** | 53 | 0 | 0 | 53 | 0% |
 | **音频系统** | 3 | 0 | 0 | 3 | 0% |
 | **其他系统** | 50+ | 2 | 0 | 48+ | 4% |
-| **总计** | ~291 | 10 | 0 | 281 | **3.4%** |
+| **总计** | ~291 | 20 | 0 | 271 | **6.9%** |
+
+**更新说明 (2025-11-25):**
+- ✅ Step 5 完成，资源系统大幅提升：MPQ、调色板、PCX、CLX/CL2、TRN全部完成
+- ✅ 核心引擎和渲染系统也获得提升（调色板渲染、资源管理）
 
 ---
 
@@ -29,13 +33,14 @@
 
 | 功能模块 | 原版文件 | Rust模块 | 状态 | 对应Step |
 |---------|---------|---------|------|---------|
-| **MPQ归档读取** | `mpq/mpq_reader.cpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **PCX图像加载** | `engine/load_pcx.cpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **CEL格式加载** | `engine/load_cel.cpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **CLX精灵加载** | `engine/clx_sprite.hpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **CL2精灵加载** | `engine/load_cl2.hpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **调色板加载** | `engine/palette.cpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
-| **TRN颜色转换** | `engine/trn.cpp` | ❌ 未实现 | 🔴 未开始 | Step 16 |
+| **MPQ归档读取** | `mpq/mpq_reader.cpp` | ✅ `resources/mpq.rs` | 🟢 已完成 | Step 5.1 |
+| **PCX图像加载** | `engine/load_pcx.cpp` | ✅ `resources/pcx.rs` | 🟢 已完成 | Step 5.2 |
+| **CEL格式加载** | `engine/load_cel.cpp` | ⏳ 待实现 | 🟡 规划中 | Step 6 |
+| **CLX精灵加载** | `engine/clx_sprite.hpp` | ✅ `resources/clx.rs` | 🟢 已完成 | Step 5.2 |
+| **CL2精灵加载** | `engine/load_cl2.hpp` | ✅ `resources/cl2.rs` | 🟢 已完成 | Step 5.2 |
+| **调色板加载** | `engine/palette.cpp` | ✅ `resources/palette.rs` | 🟢 已完成 | Step 5.1 |
+| **TRN颜色转换** | `engine/trn.cpp` | ✅ `resources/trn.rs` | 🟢 已完成 | Step 5.3 |
+| **资源管理器** | `engine/assets.cpp` | ✅ `resources/resource_manager.rs` | 🟢 已完成 | Step 5.3 |
 | **文件系统抽象** | `engine/assets.cpp` | ✅ `assets/mod.rs` | 🟢 基础完成 | Step 3 |
 | **PNG加载(简化)** | ❌ 无 | ✅ `sprite/texture.rs` | 🟢 已实现 | Step 3 |
 
@@ -48,17 +53,17 @@
 - `.PAL` - 调色板文件
 - `.TRN` - 颜色转换表
 
-**当前实现：**
-- 只支持PNG格式
-- 无MPQ支持
-- 无256色调色板
+**当前实现（✅ Step 5 已完成）：**
+- ✅ MPQ归档读取（基于libmpq FFI）
+- ✅ 256色调色板系统
+- ✅ PCX图像加载（RLE解压缩）
+- ✅ CLX/CL2精灵格式
+- ✅ TRN颜色转换
+- ✅ ResourceManager统一资源管理
+- ✅ 支持PNG格式（测试用）
 
-**需要补充：**
-- **Step 5: 原版资源格式支持**
-  - MPQ读取（使用`mpq` crate）
-  - PCX/CEL/CLX加载器
-  - 调色板系统
-  - 资源提取工具
+**待补充：**
+- **Step 6**: CEL瓦片格式、DUN/TIL/SOL地图数据
 
 ---
 
@@ -67,11 +72,11 @@
 | 功能模块 | 原版文件 | Rust模块 | 状态 | 对应Step |
 |---------|---------|---------|------|---------|
 | **基础渲染器** | `engine/render/scrollrt.cpp` | ✅ `engine.rs` | 🟢 基础完成 | Step 1 |
-| **精灵渲染** | `engine/render/clx_render.cpp` | ✅ `engine.rs` | 🟡 部分实现 | Step 3 |
+| **精灵渲染** | `engine/render/clx_render.cpp` | ✅ `engine.rs` | 🟢 已完成 | Step 5.2 |
 | **基础图形绘制** | `engine/render/primitive_render.hpp` | ✅ `renderer/mod.rs` | 🟢 已实现 | Step 2 |
 | **文本渲染** | `engine/render/text_render.cpp` | ❌ 未实现 | 🔴 未开始 | Step 9 |
 | **光照渲染** | `lighting.cpp` + `engine/render/scrollrt.cpp` | ❌ 未实现 | 🔴 未开始 | Step 21 |
-| **调色板渲染** | `engine/render/cl2_render.cpp` | ❌ 未实现 | 🔴 未开始 | Step 5 |
+| **调色板渲染** | `engine/render/cl2_render.cpp` | ✅ `resources/` | 🟢 已完成 | Step 5 |
 | **视口裁剪** | `engine/render/scrollrt.cpp::DrawGame()` | ❌ 未实现 | 🔴 未开始 | Step 4 |
 | **双缓冲** | `engine/dx.cpp` | ✅ SDL2内置 | 🟢 已实现 | Step 1 |
 | **Surface管理** | `engine/surface.hpp` | ❌ 未实现 | 🔴 未开始 | Step 9 |

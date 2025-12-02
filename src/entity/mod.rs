@@ -60,45 +60,76 @@ impl Entity {
 
     /// Create a player entity
     /// 
-    /// Player sprite sheet: 256x64 pixels, 4 frames horizontally
-    /// - Frame 1 (0-63): Idle monkey (standing)
-    /// - Frame 2 (64-127): Monkey on cloud (walk 1)
-    /// - Frame 3 (128-191): Monkey on cloud (walk 2)
-    /// - Frame 4 (192-255): Monkey on cloud (walk 3)
+    /// # Diablo 1 玩家精灵格式
+    /// 
+    /// **资源路径：**
+    /// - Idle: `plrgfx/warrior/wmn/wmnas.cl2` (Warrior Male uNarmed Stand)
+    /// - Walk: `plrgfx/warrior/wmn/wmnaw.cl2` (Warrior Male uNarmed Walk)
+    /// 
+    /// **CL2 格式说明：**
+    /// - CL2 是 Diablo 1 的精灵格式，使用 RLE 压缩
+    /// - 每个 CL2 文件包含多个方向的动画帧（通常是 8 方向）
+    /// - 帧宽度：96 像素（通过 frame_width 参数指定）
+    /// - 帧高度：通常为 96-128 像素（根据动画类型不同）
+    /// 
+    /// **纹理 ID 格式：**
+    /// - Idle: `warrior_town_idle_0`, `warrior_town_idle_1`, ...
+    /// - Walk: `warrior_town_walk_0`, `warrior_town_walk_1`, ...
+    /// 
+    /// **动画系统：**
+    /// - 当前实现：简单的帧动画（所有帧顺序播放）
+    /// - 原版 Diablo：8 方向动画（根据玩家面向选择帧序列）
+    /// - TODO: 后续需要实现 8 方向动画系统
+    /// 
+    /// # 参考代码
+    /// - `Source/player.h:82-94` - player_graphic 枚举
+    /// - `Source/playerdat.hpp:158-213` - PlayerAnimData 结构
+    /// - `Source/playerdat.hpp:129-156` - PlayerSpriteData 结构
+    /// - `game.rs:467-490` - 实际的精灵加载代码
     pub fn create_player(position: Point) -> Self {
         let mut entity = Self::new(
             EntityType::Player,
             position,
-            (64, 64),  // Player sprite is 64x64 pixels
+            (96, 96),  // Diablo 1 warrior sprite: 96x96 pixels (frame_width from CL2)
             Color::CYAN,
         );
         
         // Enable sprite rendering
         entity.use_sprite = true;
-        entity.sprite_id = Some("player".to_string());
+        entity.sprite_id = Some("warrior_town".to_string()); // 匹配 resource_manager 中的加载
         entity.speed = 200.0; // 玩家速度：200像素/秒
         
-        // Initialize animation controller with monkey animations
+        // Initialize animation controller with placeholder frames
+        // 
+        // ⚠️ 重要：这里的 frames 只是【占位符】！
+        // 
+        // **加载流程：**
+        // 1. [此处] Entity 创建时 → 使用单帧占位符（因为 MPQ 还未加载）
+        // 2. [game.rs] 运行时加载 CL2 精灵 → 获得实际帧数（idle_frame_count, walk_frame_count）
+        // 3. [game.rs:370-392] 重新配置动画 → 根据实际帧数重建 Animation
+        // 
+        // 这样设计的原因：
+        // - Entity 创建时还不知道实际帧数（资源未加载）
+        // - 解耦：Entity 不依赖资源加载系统
+        // - 运行时才能确定：只有解析 CL2 文件后才知道有多少帧
         let mut anim_controller = AnimationController::new();
         
-        // Idle animation - Frame 1: Standing monkey
+        // Idle animation - Warrior standing (从 wmnas.cl2 加载)
+        // 原版数据：idleFrames 通常为 8-10 帧（根据职业不同）
+        // 实际配置：见 game.rs:372-377
         let idle_anim = Animation::new(
-            vec![Rect::new(0, 0, 64, 64)],  // Frame 1: Idle monkey
-            0.2,    // Frame duration (not used for single frame)
+            vec![Rect::new(0, 0, 96, 96)],  // 【占位符】：单帧，运行时会被替换
+            0.15,   // Frame duration: 0.15s per frame
             true    // Loop
         );
         anim_controller.add_animation(AnimationState::Idle, idle_anim);
         
-        // Walk animation - Frames 2-4: Monkey on cloud (walking)
-        // Animation cycles through frames 2, 3, 4 for smooth walking effect
+        // Walk animation - Warrior walking (从 wmnaw.cl2 加载)
+        // 原版数据：walkingFrames 为 8 帧（每个方向）
+        // 实际配置：见 game.rs:379-387
         let walk_anim = Animation::new(
-            vec![
-                Rect::new(64, 0, 64, 64),   // Frame 2: Monkey on cloud (walk 1)
-                Rect::new(128, 0, 64, 64),  // Frame 3: Monkey on cloud (walk 2)
-                Rect::new(192, 0, 64, 64),  // Frame 4: Monkey on cloud (walk 3)
-                Rect::new(128, 0, 64, 64),  // Frame 3 again for smooth loop back
-            ],
-            0.12,   // Frame duration: 0.12s = ~8 FPS animation (smooth walking)
+            vec![Rect::new(0, 0, 96, 96)],  // 【占位符】：单帧，运行时会被替换
+            0.1,    // Frame duration: 0.1s = 10 FPS (walking speed)
             true    // Loop
         );
         anim_controller.add_animation(AnimationState::Walk, walk_anim);

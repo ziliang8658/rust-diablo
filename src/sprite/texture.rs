@@ -16,6 +16,11 @@ pub struct Texture<'a> {
 }
 
 impl<'a> Texture<'a> {
+    /// Create a new texture from SDL texture
+    pub fn new(texture: SdlTexture<'a>, width: u32, height: u32) -> Self {
+        Self { texture, width, height }
+    }
+    
     /// Get texture width
     pub fn width(&self) -> u32 {
         self.width
@@ -82,6 +87,11 @@ impl<'a> TextureManager<'a> {
     /// Check if a texture exists
     pub fn contains(&self, id: &str) -> bool {
         self.textures.contains_key(id)
+    }
+    
+    /// Add a pre-created texture
+    pub fn add(&mut self, id: &str, texture: Texture<'a>) {
+        self.textures.insert(id.to_string(), texture);
     }
 }
 
