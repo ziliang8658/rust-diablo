@@ -14,8 +14,6 @@ flate2 = "1.0"      # Zlib 解压缩
 once_cell = "1.19"
 implode = "0.1.1"   # PKWare 解压缩
 
-# 使用 mpq-rust-patched 提取文件
-mpq = { path = "../mpq-rust-patched" }
 
 # Step 6.1: Tiles系统依赖
 bitflags = "2.4"    # Tile属性标志位
