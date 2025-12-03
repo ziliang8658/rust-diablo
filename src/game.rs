@@ -604,9 +604,18 @@ impl Game {
                         println!("✓ Loaded TIL: {} mega tiles", til_data.len());
                         println!("✓ Loaded SOL: {} properties", sol_data.len());
                         
-                        // Debug: Check piece 16 blocks
+                        // Debug: Check piece 16 and 856 blocks
                         if let Some(piece) = min_data.pieces.get(16) {
                             println!("\n=== Piece 16 Blocks ===");
+                            for (i, block) in piece.mt.iter().enumerate() {
+                                println!("  block[{}]: data={:#06x} has_value={} frame={} type={:?}", 
+                                    i, block.data, block.has_value(), block.frame(), block.tile_type());
+                            }
+                        }
+                        
+                        // Debug: Check piece 856 (the problematic one)
+                        if let Some(piece) = min_data.pieces.get(856) {
+                            println!("\n=== Piece 856 Blocks (PROBLEMATIC) ===");
                             for (i, block) in piece.mt.iter().enumerate() {
                                 println!("  block[{}]: data={:#06x} has_value={} frame={} type={:?}", 
                                     i, block.data, block.has_value(), block.frame(), block.tile_type());

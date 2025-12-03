@@ -10,10 +10,12 @@
 pub mod direction;
 pub mod isometric;
 pub mod tile_renderer;
+pub mod texture_cache;
 
 // Re-exports
 pub use direction::Direction;
 pub use isometric::*;
+pub use texture_cache::TextureCache;
 
 use anyhow::{Result, bail};
 use sdl2::Sdl;
@@ -32,6 +34,10 @@ pub struct Engine {
     canvas: sdl2::render::WindowCanvas,
     texture_creator: TextureCreator<WindowContext>,
     texture_manager: TextureManager<'static>,
+    
+    /// Tile texture cache for dungeon tile rendering
+    /// Uses separate cache from general texture_manager for better organization
+    tile_texture_cache: Option<TextureCache<'static>>,
 }
 
 impl Engine {
@@ -70,7 +76,7 @@ impl Engine {
 
         
         // Create canvas for rendering
-        let mut canvas = window
+        let canvas = window
             .into_canvas()
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create canvas: {}", e))?;
@@ -86,12 +92,21 @@ impl Engine {
             )
         };
         
+        // Create tile texture cache for dungeon tile rendering
+        // Safety: tile_texture_cache and texture_creator both live for the duration of Engine
+        let tile_texture_cache = Some(unsafe {
+            std::mem::transmute::<TextureCache, TextureCache<'static>>(
+                TextureCache::new(&texture_creator)
+            )
+        });
+        
         Ok(Self {
             sdl_context,
             video_subsystem,
             canvas,
             texture_creator,
             texture_manager,
+            tile_texture_cache,
         })
     }
 
@@ -113,6 +128,14 @@ impl Engine {
     /// Get mutable texture manager reference
     pub fn texture_manager_mut(&mut self) -> &mut TextureManager<'static> {
         &mut self.texture_manager
+    }
+    
+    /// Get mutable tile texture cache reference
+    /// 
+    /// Used for caching dungeon tile textures during rendering.
+    pub fn tile_texture_cache_mut(&mut self) -> &mut TextureCache<'static> {
+        self.tile_texture_cache.as_mut()
+            .expect("Tile texture cache should always be initialized")
     }
 
     /// Create SDL texture from CLX frame
@@ -231,7 +254,7 @@ impl Engine {
     /// * `dst_rect` - Destination rectangle on screen
     pub fn draw_rgba_texture(
         &mut self,
-        texture_id: &str,
+        _texture_id: &str,
         rgba_data: &[u8],
         width: u32,
         height: u32,
@@ -273,18 +296,17 @@ impl Engine {
         // This prevents transparent edge pixels from blending and creating visible seams
         sdl_texture.set_blend_mode(sdl2::render::BlendMode::Blend);
 
-        // Draw with both horizontal and vertical flip (like player tddddextures)
-        // SDL Y-axis is top-to-bottom, but Diablo tile data is bottom-to-top
-        // SDL X-axis may also need flipping depending on tile orientation
-        // Reference: rust-diablo/src/resources/clx.rs:118-129 - CLX format flips Y-axis
+        // Draw dungeon tiles with vertical flip only
+        // CLX special CEL files (trees, etc.) store pixels bottom-to-top, need flip_v
+        // Reference: CLX format is bottom-to-top, SDL Y-axis is top-to-bottom
         self.canvas.copy_ex(
             &sdl_texture,
             None,
             sdl_rect,
             0.0,
             None,
-            true,   // flip_h - horizontal flip for tile textures
-            true,   // flip_v - vertical flip for tile textures
+            false,  // flip_h - no horizontal flip
+            true,   // flip_v - vertical flip for CLX bottom-to-top format
         )
             .map_err(|e| anyhow::anyhow!("Failed to copy texture: {}", e))?;
         
@@ -518,7 +540,10 @@ impl Engine {
 
     /// Clear the rendering surface with a color
     pub fn clear(&mut self) -> Result<()> {
-        self.clear_with_color(Color::BLACK)
+        // 🔧 FIX: Use dark gray instead of pure black to make tile seams less visible
+        // Pure black background makes transparent pixels in triangles show as black gaps
+        // TODO: Replace with proper lighting system in Step 6.4
+        self.clear_with_color(Color::new(16, 16, 16))
     }
 
     /// Clear the rendering surface with a specific color

@@ -1,0 +1,30 @@
+{
+  "name": "rust-diablo",
+  "version": "0.1.0",
+  "dependencies": [
+    "zlib",
+    "bzip2"
+  ]
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
