@@ -1,18 +1,14 @@
 /// List player graphics files in MPQ
-
 use rust_diablo::resources::MpqManager;
 
 fn main() -> anyhow::Result<()> {
     println!("=== Searching for player graphics in MPQ ===\n");
-    
+
     let mut mpq = MpqManager::new();
-    
+
     // Load DIABDAT.MPQ
-    let mpq_paths = vec![
-        "assets/Diabdat.mpq",
-        "../assets/Diabdat.mpq",
-    ];
-    
+    let mpq_paths = vec!["assets/Diabdat.mpq", "../assets/Diabdat.mpq"];
+
     let mut loaded = false;
     for path in &mpq_paths {
         match mpq.load_mpq(path, 1000) {
@@ -24,12 +20,12 @@ fn main() -> anyhow::Result<()> {
             Err(_) => continue,
         }
     }
-    
+
     if !loaded {
         eprintln!("Failed to load MPQ archive");
         return Ok(());
     }
-    
+
     // Try to find player graphics
     let test_paths = vec![
         // Warrior
@@ -40,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         "plrgfx\\warrior\\wmn\\wmnas.clx",
         "plrgfx\\warrior\\wmd\\wmdas.clx",
     ];
-    
+
     println!("Testing specific paths:");
     for path in &test_paths {
         if let Some(data) = mpq.find_file(path) {
@@ -49,22 +45,6 @@ fn main() -> anyhow::Result<()> {
             println!("  ✗ Not found: {}", path);
         }
     }
-    
+
     Ok(())
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

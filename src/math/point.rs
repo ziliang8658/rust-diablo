@@ -1,5 +1,5 @@
 /// Point - 2D coordinate structure
-/// 
+///
 /// Represents a position in 2D space. Can be used for:
 /// - World coordinates (game world position)
 /// - Screen coordinates (pixel position on screen)
@@ -65,4 +65,3 @@ impl std::ops::Sub for Point {
         Point::new(self.x - other.x, self.y - other.y)
     }
 }
-

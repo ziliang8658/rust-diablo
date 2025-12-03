@@ -1,14 +1,13 @@
 /// CLX Sprite Format Loader
-/// 
+///
 /// Handles loading and parsing of CLX sprite files.
 /// CLX is a format used for Diablo 1 sprites with CL2 RLE compression.
-/// 
+///
 /// File structure:
 /// - Header: Frame count, frame offsets, file size
 /// - Frame data (per frame):
 ///   - Frame header (6 bytes): header size, width, height
 ///   - Pixel data (CL2 RLE encoded)
-
 use anyhow::{Context, Result};
 
 /// CLX file header
@@ -23,12 +22,13 @@ impl ClxHeader {
     /// Parse CLX header from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 8 {
-            return Err(anyhow::anyhow!("CLX header too small: {} bytes", data.len()));
+            return Err(anyhow::anyhow!(
+                "CLX header too small: {} bytes",
+                data.len()
+            ));
         }
 
-        let num_frames = u32::from_le_bytes([
-            data[0], data[1], data[2], data[3]
-        ]);
+        let num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
 
         if num_frames == 0 {
             return Err(anyhow::anyhow!("CLX file has zero frames"));
@@ -71,7 +71,7 @@ impl ClxHeader {
 /// CLX frame header (6 bytes)
 #[derive(Debug, Clone)]
 pub struct ClxFrameHeader {
-    pub header_size: u16,  // Usually 6
+    pub header_size: u16, // Usually 6
     pub width: u16,
     pub height: u16,
 }
@@ -96,25 +96,25 @@ impl ClxFrameHeader {
 }
 
 /// CLX Frame
-/// 
+///
 /// Contains decoded pixel data for a single frame
 /// None values represent transparent pixels
 #[derive(Debug, Clone)]
 pub struct ClxFrame {
     pub width: u16,
     pub height: u16,
-    pub pixels: Vec<Option<u8>>,  // None = transparent pixel
+    pub pixels: Vec<Option<u8>>, // None = transparent pixel
 }
 
 impl ClxFrame {
     /// Convert frame to RGBA texture data
-    /// 
+    ///
     /// # Arguments
     /// * `palette` - Palette to use for color conversion
-    /// 
+    ///
     /// # Returns
     /// RGBA pixel data (width * height * 4 bytes)
-    /// 
+    ///
     /// Note: CL2/CLX format stores pixels bottom-to-top, so we flip the Y-axis here
     pub fn to_rgba(&self, palette: &crate::resources::palette::Palette) -> Vec<u8> {
         let width = self.width as usize;
@@ -127,7 +127,7 @@ impl ClxFrame {
                 let src_idx = y * width + x;
                 // Flip Y: write to (height - 1 - y) instead of y
                 let dst_idx = ((height - 1 - y) * width + x) * 4;
-                
+
                 if src_idx < self.pixels.len() {
                     if let Some(pixel_idx) = self.pixels[src_idx] {
                         let color = palette.to_rgb(pixel_idx);
@@ -147,7 +147,7 @@ impl ClxFrame {
 }
 
 /// CLX Sprite
-/// 
+///
 /// Contains multiple frames (for animation)
 #[derive(Debug, Clone)]
 pub struct ClxSprite {
@@ -156,16 +156,15 @@ pub struct ClxSprite {
 
 impl ClxSprite {
     /// Parse CLX file from bytes
-    /// 
+    ///
     /// # Arguments
     /// * `data` - Complete CLX file data
-    /// 
+    ///
     /// # Returns
     /// `Ok(ClxSprite)` if parsing succeeds, `Err` if format is invalid
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         // Parse header
-        let header = ClxHeader::from_bytes(data)
-            .context("Failed to parse CLX header")?;
+        let header = ClxHeader::from_bytes(data).context("Failed to parse CLX header")?;
 
         if data.len() < header.file_size as usize {
             return Err(anyhow::anyhow!(
@@ -231,26 +230,26 @@ impl ClxSprite {
     }
 
     /// Decode CL2 RLE compressed data
-    /// 
+    ///
     /// CL2 RLE rules:
     /// 1. Transparent run (0x00-0x7F):
     ///    - Value = number of transparent pixels
     ///    - Skip these pixels (don't write)
-    /// 
+    ///
     /// 2. Opaque fill (0x80-0xBF):
     ///    - Width = 0xBF - control byte
     ///    - Next byte is fill color value
     ///    - Repeat color value 'width' times
-    /// 
+    ///
     /// 3. Opaque pixels (0xC0-0xFF):
     ///    - Width = control byte - 0xBF
     ///    - Next 'width' bytes are raw pixel values
-    /// 
+    ///
     /// # Arguments
     /// * `data` - RLE compressed data
     /// * `width` - Frame width
     /// * `height` - Frame height
-    /// 
+    ///
     /// # Returns
     /// Decoded pixel data (None = transparent)
     fn decode_cl2_rle(data: &[u8], width: u16, height: u16) -> Result<Vec<Option<u8>>> {
@@ -259,7 +258,7 @@ impl ClxSprite {
         let mut data_idx = 0;
 
         const CLX_OPAQUE_MIN: u8 = 0x80;
-        const CLX_FILL_MAX: u8 = 0xBE;  // Fixed: was 0xBF
+        const CLX_FILL_MAX: u8 = 0xBE; // Fixed: was 0xBF
         const CLX_FILL_END: u8 = 0xBF;
 
         for _ in 0..height {
@@ -279,7 +278,7 @@ impl ClxSprite {
                 if control < CLX_OPAQUE_MIN {
                     // Transparent run (0x00-0x7F)
                     let transparent_count = control as usize;
-                    
+
                     // Check bounds
                     if pixel_idx + transparent_count > pixels.len() {
                         return Err(anyhow::anyhow!(
@@ -389,11 +388,11 @@ impl ClxSprite {
     }
 
     /// Convert frame to RGBA texture data
-    /// 
+    ///
     /// # Arguments
     /// * `frame_index` - Frame index (0-based)
     /// * `palette` - Palette to use for color conversion
-    /// 
+    ///
     /// # Returns
     /// RGBA pixel data
     pub fn frame_to_rgba(
@@ -401,26 +400,27 @@ impl ClxSprite {
         frame_index: usize,
         palette: &crate::resources::palette::Palette,
     ) -> Result<Vec<u8>> {
-        let frame = self.get_frame(frame_index)
+        let frame = self
+            .get_frame(frame_index)
             .ok_or_else(|| anyhow::anyhow!("Frame index {} out of bounds", frame_index))?;
 
         Ok(frame.to_rgba(palette))
     }
 
     /// Load CLX from MPQ archive
-    /// 
+    ///
     /// # Arguments
     /// * `mpq` - MPQ manager to read from
     /// * `path` - Path to CLX file in MPQ
-    /// 
+    ///
     /// # Returns
     /// `Ok(ClxSprite)` if loaded successfully
     pub fn from_mpq(mpq: &mut crate::resources::mpq::MpqManager, path: &str) -> Result<Self> {
-        let data = mpq.find_file(path)
+        let data = mpq
+            .find_file(path)
             .ok_or_else(|| anyhow::anyhow!("CLX file not found in MPQ: {}", path))?;
 
-        Self::from_bytes(&data)
-            .with_context(|| format!("Failed to parse CLX from MPQ: {}", path))
+        Self::from_bytes(&data).with_context(|| format!("Failed to parse CLX from MPQ: {}", path))
     }
 }
 
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_clx_frame_header_parse() {
         let mut frame_data = vec![0u8; 10];
-        frame_data[0] = 6;  // header_size = 6
+        frame_data[0] = 6; // header_size = 6
         frame_data[1] = 0;
         frame_data[2] = 10; // width = 10
         frame_data[3] = 0;
@@ -495,14 +495,14 @@ mod tests {
         // Test mixed: transparent + opaque fill + opaque pixels
         // 0xC2 = 0xBF + 3, so width = 3, need 3 pixel bytes
         let data = vec![
-            0x02,           // 2 transparent pixels
-            0xBE, 0x10,     // 1 opaque fill (color 0x10)
+            0x02, // 2 transparent pixels
+            0xBE, 0x10, // 1 opaque fill (color 0x10)
             0xC2, 0x20, 0x30, 0x40, // 3 opaque pixels (0xC2 = 0xBF + 3)
         ];
         let result = ClxSprite::decode_cl2_rle(&data, 6, 1).unwrap();
         assert_eq!(result.len(), 6);
-        assert_eq!(result[0], None);  // transparent
-        assert_eq!(result[1], None);  // transparent
+        assert_eq!(result[0], None); // transparent
+        assert_eq!(result[1], None); // transparent
         assert_eq!(result[2], Some(0x10)); // opaque fill
         assert_eq!(result[3], Some(0x20)); // opaque pixel
         assert_eq!(result[4], Some(0x30)); // opaque pixel
@@ -513,13 +513,12 @@ mod tests {
     fn test_cl2_rle_decode_simple_mixed() {
         // Test simpler mixed case: transparent + opaque fill
         let data = vec![
-            0x01,           // 1 transparent pixel
-            0xBE, 0x42,     // 1 opaque fill (color 0x42)
+            0x01, // 1 transparent pixel
+            0xBE, 0x42, // 1 opaque fill (color 0x42)
         ];
         let result = ClxSprite::decode_cl2_rle(&data, 2, 1).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], None);  // transparent
+        assert_eq!(result[0], None); // transparent
         assert_eq!(result[1], Some(0x42)); // opaque fill
     }
 }
-

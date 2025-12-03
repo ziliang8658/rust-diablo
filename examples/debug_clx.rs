@@ -1,5 +1,4 @@
 /// Debug CLX file format
-
 use std::fs;
 
 fn main() -> anyhow::Result<()> {
@@ -7,23 +6,23 @@ fn main() -> anyhow::Result<()> {
         "../assets/gendata/cut2w.clx",
         "../assets/gendata/cutgatew.clx",
     ];
-    
+
     for path in paths {
         println!("\n=== Analyzing {} ===", path);
-        
+
         match fs::read(path) {
             Ok(data) => {
                 println!("File size: {} bytes", data.len());
-                
+
                 if data.len() < 8 {
                     println!("File too small!");
                     continue;
                 }
-                
+
                 // Read header
                 let num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 println!("Num frames (first 4 bytes): {}", num_frames);
-                
+
                 // Print first 64 bytes as hex
                 println!("First 64 bytes:");
                 for i in 0..64.min(data.len()) {
@@ -33,7 +32,7 @@ fn main() -> anyhow::Result<()> {
                     print!("{:02x} ", data[i]);
                 }
                 println!();
-                
+
                 // Try reading as CLX
                 match rust_diablo::resources::ClxSprite::from_bytes(&data) {
                     Ok(sprite) => {
@@ -50,22 +49,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

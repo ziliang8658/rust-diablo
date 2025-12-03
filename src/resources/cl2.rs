@@ -1,16 +1,15 @@
+use crate::resources::clx::{ClxFrame, ClxSprite};
 /// CL2 Sprite Format Loader
-/// 
+///
 /// Handles loading and parsing of CL2 sprite files (original Diablo 1 format).
 /// CL2 is the original format, CLX is DevilutionX's runtime conversion format.
-/// 
+///
 /// File structure:
 /// - Header: Frame count, frame offsets, file size
 /// - Frame data (per frame):
 ///   - Frame header: 32-pixel block offsets (10 uint16s = 20 bytes typically)
 ///   - Pixel data (CL2 RLE encoded - same as CLX)
-
 use anyhow::{Context, Result};
-use crate::resources::clx::{ClxSprite, ClxFrame};
 
 /// CL2 Sprite (shares implementation with CLX after parsing frame headers)
 pub struct Cl2Sprite {
@@ -19,11 +18,11 @@ pub struct Cl2Sprite {
 
 impl Cl2Sprite {
     /// Parse CL2 file from bytes
-    /// 
+    ///
     /// # Arguments
     /// * `data` - Complete CL2 file data
     /// * `frame_width` - Width of each frame (required for CL2, as it's not in the header)
-    /// 
+    ///
     /// # Returns
     /// Parsed CL2 sprite with decoded frames
     pub fn from_bytes(data: &[u8], frame_width: u16) -> Result<Self> {
@@ -33,11 +32,11 @@ impl Cl2Sprite {
 
         // Read number of frames (or group offset if this is a sheet)
         let maybe_num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        
+
         // Check if this is a single sprite list or a sprite sheet
         let num_frames: u32;
         let group_begin: usize;
-        
+
         // If it is a number of frames, then the last frame offset equals file size
         let last_offset_pos = (maybe_num_frames * 4 + 4) as usize;
         if last_offset_pos < data.len() {
@@ -47,7 +46,7 @@ impl Cl2Sprite {
                 data[last_offset_pos + 2],
                 data[last_offset_pos + 3],
             ]);
-            
+
             if last_offset == data.len() as u32 {
                 // Single sprite list
                 num_frames = maybe_num_frames;
@@ -64,7 +63,11 @@ impl Cl2Sprite {
                 ]);
             }
         } else {
-            return Err(anyhow::anyhow!("CL2 header invalid: last offset position {} >= file size {}", last_offset_pos, data.len()));
+            return Err(anyhow::anyhow!(
+                "CL2 header invalid: last offset position {} >= file size {}",
+                last_offset_pos,
+                data.len()
+            ));
         }
 
         if num_frames == 0 {
@@ -73,11 +76,11 @@ impl Cl2Sprite {
 
         // Parse each frame
         let mut frames = Vec::with_capacity(num_frames as usize);
-        
+
         for frame_idx in 0..num_frames {
             let frame_offset_pos = group_begin + 4 + (frame_idx as usize * 4);
             let next_offset_pos = group_begin + 4 + ((frame_idx + 1) as usize * 4);
-            
+
             if next_offset_pos + 3 >= data.len() {
                 return Err(anyhow::anyhow!(
                     "CL2 frame {} offset out of bounds",
@@ -85,21 +88,24 @@ impl Cl2Sprite {
                 ));
             }
 
-            let frame_offset = group_begin + u32::from_le_bytes([
-                data[frame_offset_pos],
-                data[frame_offset_pos + 1],
-                data[frame_offset_pos + 2],
-                data[frame_offset_pos + 3],
-            ]) as usize;
+            let frame_offset = group_begin
+                + u32::from_le_bytes([
+                    data[frame_offset_pos],
+                    data[frame_offset_pos + 1],
+                    data[frame_offset_pos + 2],
+                    data[frame_offset_pos + 3],
+                ]) as usize;
 
-            let next_offset = group_begin + u32::from_le_bytes([
-                data[next_offset_pos],
-                data[next_offset_pos + 1],
-                data[next_offset_pos + 2],
-                data[next_offset_pos + 3],
-            ]) as usize;
+            let next_offset = group_begin
+                + u32::from_le_bytes([
+                    data[next_offset_pos],
+                    data[next_offset_pos + 1],
+                    data[next_offset_pos + 2],
+                    data[next_offset_pos + 3],
+                ]) as usize;
 
-            if frame_offset >= data.len() || next_offset > data.len() || frame_offset >= next_offset {
+            if frame_offset >= data.len() || next_offset > data.len() || frame_offset >= next_offset
+            {
                 return Err(anyhow::anyhow!(
                     "CL2 frame {} invalid offsets: frame_offset={}, next_offset={}, data_len={}",
                     frame_idx,
@@ -112,16 +118,17 @@ impl Cl2Sprite {
             // CL2 frame header: First 2 bytes indicate the offset to pixel data
             // This offset points past the 32-pixel block offset table
             if frame_offset + 1 >= data.len() {
-                return Err(anyhow::anyhow!("CL2 frame {} header out of bounds", frame_idx));
+                return Err(anyhow::anyhow!(
+                    "CL2 frame {} header out of bounds",
+                    frame_idx
+                ));
             }
 
-            let pixel_data_offset = u16::from_le_bytes([
-                data[frame_offset],
-                data[frame_offset + 1],
-            ]) as usize;
+            let pixel_data_offset =
+                u16::from_le_bytes([data[frame_offset], data[frame_offset + 1]]) as usize;
 
             let pixel_data_start = frame_offset + pixel_data_offset;
-            
+
             if pixel_data_start >= next_offset {
                 return Err(anyhow::anyhow!(
                     "CL2 frame {} pixel data offset invalid: {} >= {}",
@@ -135,10 +142,8 @@ impl Cl2Sprite {
 
             // Decode CL2 RLE pixel data
             // We need to determine the frame height by decoding
-            let (pixels, height) = Self::decode_cl2_rle_with_height(
-                pixel_data,
-                frame_width,
-            ).with_context(|| format!("Failed to decode CL2 frame {} RLE data", frame_idx))?;
+            let (pixels, height) = Self::decode_cl2_rle_with_height(pixel_data, frame_width)
+                .with_context(|| format!("Failed to decode CL2 frame {} RLE data", frame_idx))?;
 
             frames.push(ClxFrame {
                 width: frame_width,
@@ -151,7 +156,7 @@ impl Cl2Sprite {
     }
 
     /// Decode CL2 RLE compressed data and determine height
-    /// 
+    ///
     /// CL2 RLE uses the same encoding as CLX.
     /// We decode and track how many complete rows we've filled.
     fn decode_cl2_rle_with_height(data: &[u8], width: u16) -> Result<(Vec<Option<u8>>, u16)> {
@@ -186,7 +191,9 @@ impl Cl2Sprite {
                     let fill_width = (CLX_FILL_END - control) as u16;
 
                     if data_idx >= data.len() {
-                        return Err(anyhow::anyhow!("CL2 opaque fill overflow: missing fill color byte"));
+                        return Err(anyhow::anyhow!(
+                            "CL2 opaque fill overflow: missing fill color byte"
+                        ));
                     }
 
                     let fill_color = data[data_idx];
@@ -261,25 +268,9 @@ mod tests {
             0x08, 0x00, 0x00, 0x00, // frame 0 offset = 8
             0x0C, 0x00, 0x00, 0x00, // file size = 12
         ];
-        
+
         let result = Cl2Sprite::from_bytes(&data, 32);
         // This will fail because we don't have actual pixel data, but structure check passes
         assert!(result.is_err());
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

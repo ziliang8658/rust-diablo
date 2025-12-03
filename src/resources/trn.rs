@@ -1,23 +1,22 @@
 /// TRN颜色转换模块
-/// 
+///
 /// TRN (Translation) 文件用于实现精灵的颜色映射变换。
 /// 这是90年代游戏常用的内存优化技术：只存储一个精灵，
 /// 通过256字节的颜色映射表生成不同颜色的变体。
-/// 
+///
 /// 文件格式：
 /// - 大小：256字节
 /// - 内容：调色板索引映射表
 /// - 映射规则：new_index = trn[old_index]
-/// 
+///
 /// 参考代码：
 /// - Source/engine/load_file.hpp - 文件加载
 /// - Source/monster.cpp - 怪物生成时应用TRN
 /// - Source/player.cpp - 玩家装备变色
-
 use anyhow::Result;
 
 /// TRN颜色转换表
-/// 
+///
 /// 存储256个字节的调色板索引映射关系。
 /// 通过将原始索引映射到新索引，实现颜色变换。
 #[derive(Debug, Clone)]
@@ -29,14 +28,14 @@ pub struct ColorTransform {
 
 impl ColorTransform {
     /// 从字节数据加载TRN
-    /// 
+    ///
     /// # 参数
     /// - `data`: TRN文件数据，必须是256字节
-    /// 
+    ///
     /// # 返回
     /// - `Ok(ColorTransform)`: 成功加载
     /// - `Err`: 数据长度不正确
-    /// 
+    ///
     /// # 示例
     /// ```
     /// let trn_data = vec![0u8; 256]; // 256字节数据
@@ -57,7 +56,7 @@ impl ColorTransform {
     }
 
     /// 创建恒等映射（identity mapping）
-    /// 
+    ///
     /// 返回一个不做任何变换的TRN（每个索引映射到自己）。
     /// 用于测试或作为默认值。
     pub fn identity() -> Self {
@@ -69,13 +68,13 @@ impl ColorTransform {
     }
 
     /// 应用颜色映射到单个颜色索引
-    /// 
+    ///
     /// # 参数
     /// - `color_index`: 原始调色板索引
-    /// 
+    ///
     /// # 返回
     /// 映射后的新索引
-    /// 
+    ///
     /// # 示例
     /// ```
     /// let trn = ColorTransform::from_bytes(&trn_data)?;
@@ -87,13 +86,13 @@ impl ColorTransform {
     }
 
     /// 应用颜色映射到像素数组（批量操作）
-    /// 
+    ///
     /// 修改传入的像素数组，将每个非透明像素的索引进行映射。
     /// 透明像素（None）保持不变。
-    /// 
+    ///
     /// # 参数
     /// - `pixels`: 可变的像素数组，包含 Option<u8>（None表示透明）
-    /// 
+    ///
     /// # 示例
     /// ```
     /// let mut pixels = vec![Some(10), None, Some(20), Some(30)];
@@ -109,7 +108,7 @@ impl ColorTransform {
     }
 
     /// 检查TRN是否为恒等映射
-    /// 
+    ///
     /// 如果所有索引都映射到自己，返回true。
     pub fn is_identity(&self) -> bool {
         for i in 0..256 {
@@ -121,13 +120,15 @@ impl ColorTransform {
     }
 
     /// 获取TRN的变化统计
-    /// 
+    ///
     /// 返回有多少个索引被映射到了不同的值。
-    /// 
+    ///
     /// # 返回
     /// (changed_count, total_count) - (变化的索引数, 总索引数256)
     pub fn change_stats(&self) -> (usize, usize) {
-        let changed = self.map.iter()
+        let changed = self
+            .map
+            .iter()
             .enumerate()
             .filter(|(i, &mapped)| *i != mapped as usize)
             .count();
@@ -135,7 +136,7 @@ impl ColorTransform {
     }
 
     /// 打印TRN映射表（调试用）
-    /// 
+    ///
     /// 只打印被映射到不同值的索引。
     pub fn print_mappings(&self) {
         println!("TRN Color Mappings:");
@@ -179,10 +180,10 @@ mod tests {
     #[test]
     fn test_identity_mapping() {
         let trn = ColorTransform::identity();
-        
+
         // 检查是否为恒等映射
         assert!(trn.is_identity());
-        
+
         // 检查每个索引映射到自己
         for i in 0..256 {
             assert_eq!(trn.apply(i as u8), i as u8);
@@ -196,14 +197,14 @@ mod tests {
         for i in 0..256 {
             data[i] = ((i + 1) % 256) as u8;
         }
-        
+
         let trn = ColorTransform::from_bytes(&data).unwrap();
-        
+
         // 测试映射
         assert_eq!(trn.apply(0), 1);
         assert_eq!(trn.apply(10), 11);
         assert_eq!(trn.apply(255), 0); // 255+1 = 0 (mod 256)
-        
+
         // 不是恒等映射
         assert!(!trn.is_identity());
     }
@@ -216,24 +217,24 @@ mod tests {
             data[i] = ((i * 2) % 256) as u8;
         }
         let trn = ColorTransform::from_bytes(&data).unwrap();
-        
+
         // 测试像素数组
         let mut pixels = vec![
             Some(10),
-            None,      // 透明像素
+            None, // 透明像素
             Some(20),
             Some(100),
-            None,      // 透明像素
+            None, // 透明像素
         ];
-        
+
         trn.apply_to_pixels(&mut pixels);
-        
+
         // 检查结果
-        assert_eq!(pixels[0], Some(20));  // 10 * 2 = 20
-        assert_eq!(pixels[1], None);      // 透明保持不变
-        assert_eq!(pixels[2], Some(40));  // 20 * 2 = 40
+        assert_eq!(pixels[0], Some(20)); // 10 * 2 = 20
+        assert_eq!(pixels[1], None); // 透明保持不变
+        assert_eq!(pixels[2], Some(40)); // 20 * 2 = 40
         assert_eq!(pixels[3], Some(200)); // 100 * 2 = 200
-        assert_eq!(pixels[4], None);      // 透明保持不变
+        assert_eq!(pixels[4], None); // 透明保持不变
     }
 
     #[test]
@@ -243,7 +244,7 @@ mod tests {
         let (changed, total) = trn_id.change_stats();
         assert_eq!(changed, 0);
         assert_eq!(total, 256);
-        
+
         // 部分变化的映射
         let mut data = vec![0u8; 256];
         for i in 0..256 {
@@ -253,7 +254,7 @@ mod tests {
         for i in 0..10 {
             data[i] = (i + 100) as u8;
         }
-        
+
         let trn = ColorTransform::from_bytes(&data).unwrap();
         let (changed, total) = trn.change_stats();
         assert_eq!(changed, 10);
@@ -268,7 +269,7 @@ mod tests {
             data[i] = i as u8;
         }
         data[0] = 10; // 将索引0映射到10
-        
+
         let trn = ColorTransform::from_bytes(&data).unwrap();
         assert_eq!(trn.apply(0), 10);
     }
@@ -278,16 +279,16 @@ mod tests {
         // 测试映射和反映射
         let mut forward = vec![0u8; 256];
         let mut backward = vec![0u8; 256];
-        
+
         // 创建一个可逆的映射（简单的反转：i -> 255-i）
         for i in 0..256 {
             forward[i] = (255 - i) as u8;
             backward[255 - i] = i as u8;
         }
-        
+
         let trn_fwd = ColorTransform::from_bytes(&forward).unwrap();
         let trn_bwd = ColorTransform::from_bytes(&backward).unwrap();
-        
+
         // 测试：应用forward再应用backward应该回到原值
         for i in 0..256 {
             let mapped = trn_fwd.apply(i as u8);
@@ -296,4 +297,3 @@ mod tests {
         }
     }
 }
-

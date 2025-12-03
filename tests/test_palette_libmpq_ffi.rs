@@ -1,19 +1,18 @@
-/// 使用 libmpq FFI 读取和测试 Palette
-/// 
-/// 这个测试使用 libmpq FFI 直接从 MPQ 文件读取 palette 数据，
-/// 然后验证 palette 的解析和基本功能。
-
-use std::path::Path;
-use std::ffi::CString;
-use std::ptr;
 use rust_diablo::resources::libmpq_ffi::*;
 use rust_diablo::resources::palette::Palette;
+use std::ffi::CString;
+/// 使用 libmpq FFI 读取和测试 Palette
+///
+/// 这个测试使用 libmpq FFI 直接从 MPQ 文件读取 palette 数据，
+/// 然后验证 palette 的解析和基本功能。
+use std::path::Path;
+use std::ptr;
 
 /// 测试使用 libmpq FFI 读取 town.pal
 #[test]
 fn test_read_town_pal_with_libmpq_ffi() {
     let mpq_path = "assets/Diabdat.mpq";
-    
+
     // 检查 MPQ 文件是否存在
     if !Path::new(mpq_path).exists() {
         println!("⚠️  MPQ 文件不存在，跳过测试: {}", mpq_path);
@@ -42,8 +41,8 @@ fn test_read_town_pal_with_libmpq_ffi() {
 
         // 2. 查找文件（尝试两种路径格式）
         let filenames = vec![
-            "levels\\towndata\\town.pal",  // Windows 格式（反斜杠）
-            "levels/towndata/town.pal",    // Unix 格式（正斜杠）
+            "levels\\towndata\\town.pal", // Windows 格式（反斜杠）
+            "levels/towndata/town.pal",   // Unix 格式（正斜杠）
         ];
 
         let mut file_number: u32 = 0;
@@ -51,11 +50,7 @@ fn test_read_town_pal_with_libmpq_ffi() {
 
         for filename in &filenames {
             let c_filename = CString::new(*filename).unwrap();
-            let result = libmpq__file_number(
-                archive,
-                c_filename.as_ptr(),
-                &mut file_number,
-            );
+            let result = libmpq__file_number(archive, c_filename.as_ptr(), &mut file_number);
 
             if is_success(result) {
                 found_filename = Some(*filename);
@@ -75,11 +70,7 @@ fn test_read_town_pal_with_libmpq_ffi() {
 
         // 3. 获取文件大小
         let mut unpacked_size: i64 = 0;
-        let result = libmpq__file_size_unpacked(
-            archive,
-            file_number,
-            &mut unpacked_size,
-        );
+        let result = libmpq__file_size_unpacked(archive, file_number, &mut unpacked_size);
 
         if !is_success(result) {
             println!("⚠️  无法获取文件大小，跳过测试");
@@ -129,8 +120,10 @@ fn test_read_town_pal_with_libmpq_ffi() {
                 println!("\n前 10 种颜色:");
                 for i in 0..10 {
                     let color = palette.to_rgb(i as u8);
-                    println!("  颜色 {:3}: RGB({:3}, {:3}, {:3})", 
-                        i, color.r, color.g, color.b);
+                    println!(
+                        "  颜色 {:3}: RGB({:3}, {:3}, {:3})",
+                        i, color.r, color.g, color.b
+                    );
                 }
 
                 // 显示一些关键颜色索引
@@ -138,32 +131,45 @@ fn test_read_town_pal_with_libmpq_ffi() {
                 let key_indices = vec![0, 1, 128, 255];
                 for &idx in &key_indices {
                     let color = palette.to_rgb(idx as u8);
-                    println!("  索引 {:3}: RGB({:3}, {:3}, {:3})", 
-                        idx, color.r, color.g, color.b);
+                    println!(
+                        "  索引 {:3}: RGB({:3}, {:3}, {:3})",
+                        idx, color.r, color.g, color.b
+                    );
                 }
 
                 // 测试透明度功能
                 println!("\n=== 测试透明度功能 ===\n");
                 let rgba_transparent = palette.to_rgba(0, true);
-                println!("  索引 0 (透明模式): RGBA({}, {}, {}, {})", 
-                    rgba_transparent[0], rgba_transparent[1], 
-                    rgba_transparent[2], rgba_transparent[3]);
+                println!(
+                    "  索引 0 (透明模式): RGBA({}, {}, {}, {})",
+                    rgba_transparent[0],
+                    rgba_transparent[1],
+                    rgba_transparent[2],
+                    rgba_transparent[3]
+                );
                 assert_eq!(rgba_transparent[3], 0, "索引 0 在透明模式下应该是透明的");
 
                 let rgba_opaque = palette.to_rgba(0, false);
-                println!("  索引 0 (不透明模式): RGBA({}, {}, {}, {})", 
-                    rgba_opaque[0], rgba_opaque[1], 
-                    rgba_opaque[2], rgba_opaque[3]);
+                println!(
+                    "  索引 0 (不透明模式): RGBA({}, {}, {}, {})",
+                    rgba_opaque[0], rgba_opaque[1], rgba_opaque[2], rgba_opaque[3]
+                );
                 assert_eq!(rgba_opaque[3], 255, "索引 0 在不透明模式下应该是不透明的");
 
                 // 测试批量转换
                 println!("\n=== 测试批量转换 ===\n");
                 let test_indices = vec![0u8, 1u8, 128u8, 255u8];
                 let rgba_data = palette.indices_to_rgba(&test_indices, true);
-                println!("  转换 {} 个索引到 RGBA: {} 字节", 
-                    test_indices.len(), rgba_data.len());
-                assert_eq!(rgba_data.len(), test_indices.len() * 4, 
-                    "RGBA 数据大小应该是索引数量的 4 倍");
+                println!(
+                    "  转换 {} 个索引到 RGBA: {} 字节",
+                    test_indices.len(),
+                    rgba_data.len()
+                );
+                assert_eq!(
+                    rgba_data.len(),
+                    test_indices.len() * 4,
+                    "RGBA 数据大小应该是索引数量的 4 倍"
+                );
 
                 println!("\n✅ 所有测试通过！");
             }
@@ -179,7 +185,7 @@ fn test_read_town_pal_with_libmpq_ffi() {
 #[test]
 fn test_read_multiple_palettes() {
     let mpq_path = "assets/Diabdat.mpq";
-    
+
     if !Path::new(mpq_path).exists() {
         println!("⚠️  MPQ 文件不存在，跳过测试: {}", mpq_path);
         return;
@@ -191,11 +197,7 @@ fn test_read_multiple_palettes() {
     let mut archive: mpq_archive = ptr::null_mut();
 
     unsafe {
-        let result = libmpq__archive_open(
-            &mut archive as *mut mpq_archive,
-            c_path.as_ptr(),
-            0,
-        );
+        let result = libmpq__archive_open(&mut archive as *mut mpq_archive, c_path.as_ptr(), 0);
 
         if !is_success(result) {
             println!("⚠️  无法打开 MPQ 文件，跳过测试");
@@ -220,11 +222,7 @@ fn test_read_multiple_palettes() {
             let c_filename = CString::new(*path).unwrap();
             let mut file_number: u32 = 0;
 
-            let result = libmpq__file_number(
-                archive,
-                c_filename.as_ptr(),
-                &mut file_number,
-            );
+            let result = libmpq__file_number(archive, c_filename.as_ptr(), &mut file_number);
 
             if !is_success(result) {
                 println!("❌ 未找到");
@@ -234,11 +232,7 @@ fn test_read_multiple_palettes() {
 
             // 获取文件大小
             let mut unpacked_size: i64 = 0;
-            let result = libmpq__file_size_unpacked(
-                archive,
-                file_number,
-                &mut unpacked_size,
-            );
+            let result = libmpq__file_size_unpacked(archive, file_number, &mut unpacked_size);
 
             if !is_success(result) {
                 println!("❌ 无法获取大小");
@@ -296,7 +290,7 @@ fn test_read_multiple_palettes() {
 #[test]
 fn test_palette_color_ranges() {
     let mpq_path = "assets/Diabdat.mpq";
-    
+
     if !Path::new(mpq_path).exists() {
         println!("⚠️  MPQ 文件不存在，跳过测试: {}", mpq_path);
         return;
@@ -308,11 +302,7 @@ fn test_palette_color_ranges() {
     let mut archive: mpq_archive = ptr::null_mut();
 
     unsafe {
-        let result = libmpq__archive_open(
-            &mut archive as *mut mpq_archive,
-            c_path.as_ptr(),
-            0,
-        );
+        let result = libmpq__archive_open(&mut archive as *mut mpq_archive, c_path.as_ptr(), 0);
 
         if !is_success(result) {
             println!("⚠️  无法打开 MPQ 文件，跳过测试");
@@ -323,11 +313,7 @@ fn test_palette_color_ranges() {
         let c_filename = CString::new(filename).unwrap();
         let mut file_number: u32 = 0;
 
-        let result = libmpq__file_number(
-            archive,
-            c_filename.as_ptr(),
-            &mut file_number,
-        );
+        let result = libmpq__file_number(archive, c_filename.as_ptr(), &mut file_number);
 
         if !is_success(result) {
             println!("⚠️  无法找到文件，跳过测试");
@@ -336,11 +322,7 @@ fn test_palette_color_ranges() {
         }
 
         let mut unpacked_size: i64 = 0;
-        let result = libmpq__file_size_unpacked(
-            archive,
-            file_number,
-            &mut unpacked_size,
-        );
+        let result = libmpq__file_size_unpacked(archive, file_number, &mut unpacked_size);
 
         if !is_success(result) {
             libmpq__archive_close(archive);
@@ -406,7 +388,8 @@ fn test_palette_color_ranges() {
             color_map.entry(key).or_insert_with(Vec::new).push(i);
         }
 
-        let duplicates: Vec<_> = color_map.iter()
+        let duplicates: Vec<_> = color_map
+            .iter()
             .filter(|(_, indices)| indices.len() > 1)
             .collect();
 
@@ -422,4 +405,3 @@ fn test_palette_color_ranges() {
         println!("\n✅ 颜色范围测试完成");
     }
 }
-

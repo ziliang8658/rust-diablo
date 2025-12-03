@@ -1,19 +1,19 @@
+mod assets;
+mod engine;
+mod entity;
 /// Rust Diablo - A Rust rewrite of Diablo 1
-/// 
+///
 /// This is a learning project to rewrite the Diablo 1 game engine in Rust.
 /// We'll build it incrementally, starting with the most basic framework.
-
 mod game;
-mod engine;
+mod levels;
+mod lighting; // Step 6.4.1: Lighting system
 mod math;
 mod renderer;
-mod entity;
-mod world;
-mod sprite;
-mod assets;
 mod resources;
-mod tiles;  // Step 6.1: Tiles system
-mod levels; // Step 6.3: Dungeon generation
+mod sprite;
+mod tiles; // Step 6.1: Tiles system
+mod world; // Step 6.3: Dungeon generation
 
 use anyhow::Result;
 use game::Game;
@@ -33,7 +33,6 @@ fn main() -> Result<()> {
     println!("  F1 - Cathedral Dungeon (Step 6.1 Tiles System)");
     println!("  F2 - Town Preview (Step 5.3)");
     println!("===============================================\n");
-    
+
     run_game()
 }
-

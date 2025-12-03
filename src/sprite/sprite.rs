@@ -1,7 +1,6 @@
 /// Sprite - Renderable sprite object
-/// 
+///
 /// Represents a sprite that can be drawn on screen
-
 use crate::math::{Point, Rect};
 
 /// Sprite structure
@@ -59,4 +58,3 @@ impl Sprite {
         self
     }
 }
-

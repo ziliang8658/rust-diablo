@@ -1,7 +1,6 @@
 /// Assets module - Resource management
-/// 
+///
 /// Manages game assets and resources
-
 use std::path::Path;
 
 /// Asset paths
@@ -28,4 +27,3 @@ impl AssetPaths {
         Path::new(Self::assets_dir()).exists()
     }
 }
-

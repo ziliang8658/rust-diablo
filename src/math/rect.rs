@@ -1,8 +1,7 @@
 /// Rect - Rectangular area structure
-/// 
+///
 /// Represents a rectangular region in 2D space.
 /// Used for collision detection, rendering bounds, etc.
-
 use super::Point;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +15,12 @@ pub struct Rect {
 impl Rect {
     /// Create a new rectangle
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Create a rectangle from position and size
@@ -63,4 +67,3 @@ impl Rect {
         sdl2::rect::Rect::new(self.x, self.y, self.width, self.height)
     }
 }
-

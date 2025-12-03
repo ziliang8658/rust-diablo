@@ -1,5 +1,5 @@
 /// 使用 libmpq FFI 提取文件
-/// 
+///
 /// 用法: cargo run --example extract_with_libmpq
 
 fn main() {
@@ -8,7 +8,7 @@ fn main() {
     use std::path::Path;
 
     println!("=== libmpq 文件提取工具 ===\n");
-    
+
     // 打开 MPQ
     let archive = match LibMpqArchive::open("assets/Diabdat.mpq") {
         Ok(a) => {
@@ -20,7 +20,7 @@ fn main() {
             return;
         }
     };
-    
+
     // 要提取的文件列表
     let files = vec![
         "levels/towndata/town.pal",
@@ -33,26 +33,25 @@ fn main() {
         "plrgfx/rogue/rl/rl.pal",
         "plrgfx/sorceror/sl/sl.pal",
     ];
-    
+
     let output_dir = "assets/extracted";
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
-    
+
     println!("提取文件:\n");
-    
+
     let mut success_count = 0;
     let mut fail_count = 0;
-    
+
     for filename in &files {
         print!("  {} ... ", filename);
-        
+
         match archive.read_file(filename) {
             Ok(data) => {
                 println!("✔ 成功 ({} 字节)", data.len());
-                
-                let output_path = Path::new(output_dir).join(
-                    Path::new(filename).file_name().unwrap()
-                );
-                
+
+                let output_path =
+                    Path::new(output_dir).join(Path::new(filename).file_name().unwrap());
+
                 if let Err(e) = fs::write(&output_path, &data) {
                     eprintln!("    保存失败: {}", e);
                     fail_count += 1;
@@ -67,18 +66,9 @@ fn main() {
             }
         }
     }
-    
+
     println!("\n=== 总结 ===");
     println!("✔ 成功: {} 个", success_count);
     println!("❌ 失败: {} 个", fail_count);
     println!("\n文件保存在: {}/", output_dir);
 }
-
-
-
-
-
-
-
-
-

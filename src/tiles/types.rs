@@ -1,14 +1,13 @@
 /// Tile type definitions and properties for Diablo level rendering
-/// 
+///
 /// This module defines tile types and properties used in the level generation and rendering.
-/// 
+///
 /// # References
 /// - Original code: `Source/levels/dun_tile.hpp`
-
 use bitflags::bitflags;
 
 /// Dungeon type enumeration
-/// 
+///
 /// Corresponds to the different dungeon levels in Diablo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DungeonType {
@@ -25,20 +24,20 @@ pub enum DungeonType {
 }
 
 /// Level tile type
-/// 
+///
 /// The tile type determines data encoding and the shape.
 /// Each tile type has its own encoding but they all encode data in the order
 /// of bottom-to-top (bottom row first).
-/// 
+///
 /// # Tile Shapes
-/// 
+///
 /// - Square: 🮆 A 32x32 square
 /// - TransparentSquare: 🮆 A 32x32 square with transparency (RLE encoded)
 /// - LeftTriangle: 🭮 Left-pointing 32x31 triangle
 /// - RightTriangle: 🭬 Right-pointing 32x31 triangle
 /// - LeftTrapezoid: 🭓 Left-pointing 32x32 trapezoid
 /// - RightTrapezoid: 🭞 Right-pointing 32x32 trapezoid
-/// 
+///
 /// # Reference
 /// Original code: `Source/levels/dun_tile.hpp::TileType`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,32 +47,32 @@ pub enum TileType {
     Square = 0,
 
     /// 🮆 A 32x32 square with transparency. RLE encoded.
-    /// 
+    ///
     /// Each run starts with an int8_t value.
     /// If positive, it is followed by this many pixels.
     /// If negative, it indicates `-value` fully transparent pixels, which are omitted.
-    /// 
+    ///
     /// Runs do not cross row boundaries.
     TransparentSquare = 1,
 
     /// 🭮 Left-pointing 32x31 triangle. Encoded as 31 varying-width rows with 2 padding bytes before every even row.
-    /// 
+    ///
     /// The smallest rows (bottom and top) are 2px wide, the largest row is 32px wide (middle row).
     LeftTriangle = 2,
 
     /// 🭬 Right-pointing 32x31 triangle. Encoded as 31 varying-width rows with 2 padding bytes after every even row.
-    /// 
+    ///
     /// The smallest rows (bottom and top) are 2px wide, the largest row is 32px wide (middle row).
     RightTriangle = 3,
 
     /// 🭓 Left-pointing 32x32 trapezoid: a 32x16 rectangle and the 16x16 bottom part of `LeftTriangle`.
-    /// 
+    ///
     /// Begins with triangle part, which uses the `LeftTriangle` encoding,
     /// and is followed by a flat array of pixels for the top rectangle part.
     LeftTrapezoid = 4,
 
     /// 🭞 Right-pointing 32x32 trapezoid: 32x16 rectangle and the 16x16 bottom part of `RightTriangle`.
-    /// 
+    ///
     /// Begins with the triangle part, which uses the `RightTriangle` encoding,
     /// and is followed by a flat array of pixels for the top rectangle part.
     RightTrapezoid = 5,
@@ -106,16 +105,16 @@ impl Default for TileType {
 }
 
 /// Specifies the current MIN block of the level CEL file, as used during rendering of the level tiles.
-/// 
+///
 /// This is a 16-bit value that encodes both the tile type (high 3 bits) and the frame index (low 12 bits).
-/// 
+///
 /// # Bit Layout
 /// ```
 /// Bits 15-12: Reserved
 /// Bits 14-12: Tile type (0-5)
 /// Bits 11-0:  Frame index (1-based index in pDungeonCels)
 /// ```
-/// 
+///
 /// # Reference
 /// Original code: `Source/levels/dun_tile.hpp::LevelCelBlock`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +140,7 @@ impl LevelCelBlock {
     }
 
     /// Get the frame index (1-based)
-    /// 
+    ///
     /// Returns the 1-based index of the frame in `pDungeonCels`.
     pub fn frame(&self) -> u16 {
         self.data & 0xFFF
@@ -165,14 +164,14 @@ impl Default for LevelCelBlock {
 
 bitflags! {
     /// Tile properties
-    /// 
+    ///
     /// These flags define various properties of tiles, such as:
     /// - Solid: Cannot be walked through
     /// - BlockLight: Blocks line of sight
     /// - BlockMissile: Blocks projectiles
     /// - Transparent: Has transparency
     /// - Trap: Is a trap tile
-    /// 
+    ///
     /// # Reference
     /// Original code: `Source/levels/dun_tile.hpp::TileProperties`
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -230,10 +229,10 @@ impl TileProperties {
 }
 
 /// Width of a tile rendering primitive
-pub const DUN_FRAME_WIDTH: i32 = 32;  // TILE_WIDTH / 2
+pub const DUN_FRAME_WIDTH: i32 = 32; // TILE_WIDTH / 2
 
 /// Height of a tile rendering primitive (except triangles)
-pub const DUN_FRAME_HEIGHT: i32 = 32;  // TILE_HEIGHT
+pub const DUN_FRAME_HEIGHT: i32 = 32; // TILE_HEIGHT
 
 /// Height of triangle tile types
 pub const DUN_FRAME_TRIANGLE_HEIGHT: i32 = 31;
@@ -273,7 +272,7 @@ mod tests {
     fn test_level_cel_block_decoding() {
         // Test data: type = 1 (TransparentSquare), frame = 0xABC
         let block = LevelCelBlock::new(0x1ABC);
-        
+
         assert!(block.has_value());
         assert_eq!(block.tile_type(), TileType::TransparentSquare);
         assert_eq!(block.frame(), 0xABC);
@@ -282,16 +281,16 @@ mod tests {
     #[test]
     fn test_level_cel_block_encoding() {
         let block = LevelCelBlock::from_parts(TileType::LeftTriangle, 0x123);
-        
+
         assert_eq!(block.tile_type(), TileType::LeftTriangle);
         assert_eq!(block.frame(), 0x123);
-        assert_eq!(block.data, 0x2123);  // Type 2 << 12 | frame 0x123
+        assert_eq!(block.data, 0x2123); // Type 2 << 12 | frame 0x123
     }
 
     #[test]
     fn test_level_cel_block_zero() {
         let block = LevelCelBlock::new(0);
-        
+
         assert!(!block.has_value());
         assert_eq!(block.frame(), 0);
     }
@@ -299,7 +298,7 @@ mod tests {
     #[test]
     fn test_tile_properties() {
         let props = TileProperties::SOLID | TileProperties::BLOCK_LIGHT;
-        
+
         assert!(props.contains(TileProperties::SOLID));
         assert!(props.contains(TileProperties::BLOCK_LIGHT));
         assert!(!props.contains(TileProperties::TRANSPARENT));
@@ -308,8 +307,8 @@ mod tests {
 
     #[test]
     fn test_tile_properties_from_byte() {
-        let props = TileProperties::from_byte(0b0000_0011);  // SOLID | BLOCK_LIGHT
-        
+        let props = TileProperties::from_byte(0b0000_0011); // SOLID | BLOCK_LIGHT
+
         assert!(props.contains(TileProperties::SOLID));
         assert!(props.contains(TileProperties::BLOCK_LIGHT));
         assert!(!props.contains(TileProperties::BLOCK_MISSILE));
@@ -318,7 +317,7 @@ mod tests {
     #[test]
     fn test_tile_properties_to_byte() {
         let props = TileProperties::SOLID | TileProperties::BLOCK_MISSILE;
-        assert_eq!(props.to_byte(), 0b0000_0101);  // Bits 0 and 2
+        assert_eq!(props.to_byte(), 0b0000_0101); // Bits 0 and 2
     }
 
     #[test]
@@ -330,4 +329,3 @@ mod tests {
         assert_eq!(REENCODED_TRAPEZOID_FRAME_SIZE, 784);
     }
 }
-

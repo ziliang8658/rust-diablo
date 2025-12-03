@@ -1,44 +1,46 @@
+use crate::resources::palette::Palette;
 /// PCX Image Format Loader
-/// 
+///
 /// Handles loading and parsing of PCX (Paintbrush) image files.
 /// PCX is a 256-color indexed image format with RLE compression.
-/// 
+///
 /// File structure:
 /// - Header (128 bytes): Image metadata
 /// - Pixel data (RLE compressed): 256-color indexed image
 /// - Palette (768 bytes, optional): RGB palette at end of file
-
 use anyhow::{Context, Result};
-use crate::resources::palette::Palette;
 
 /// PCX file header (128 bytes)
 #[derive(Debug, Clone)]
 pub struct PcxHeader {
-    pub manufacturer: u8,      // 0x0A (PCX identifier)
-    pub version: u8,           // Version number
-    pub encoding: u8,          // Encoding (1 = RLE)
-    pub bits_per_pixel: u8,   // Bits per pixel (8 = 256 colors)
-    pub xmin: u16,            // Image left boundary
-    pub ymin: u16,            // Image top boundary
-    pub xmax: u16,            // Image right boundary
-    pub ymax: u16,            // Image bottom boundary
-    pub hdpi: u16,            // Horizontal resolution
-    pub vdpi: u16,            // Vertical resolution
-    pub colormap: [u8; 48],   // 16-color palette (usually unused)
-    pub reserved: u8,         // Reserved byte
-    pub n_planes: u8,         // Number of color planes (1 = single plane)
-    pub bytes_per_line: u16,  // Bytes per line (must be even)
+    pub manufacturer: u8,    // 0x0A (PCX identifier)
+    pub version: u8,         // Version number
+    pub encoding: u8,        // Encoding (1 = RLE)
+    pub bits_per_pixel: u8,  // Bits per pixel (8 = 256 colors)
+    pub xmin: u16,           // Image left boundary
+    pub ymin: u16,           // Image top boundary
+    pub xmax: u16,           // Image right boundary
+    pub ymax: u16,           // Image bottom boundary
+    pub hdpi: u16,           // Horizontal resolution
+    pub vdpi: u16,           // Vertical resolution
+    pub colormap: [u8; 48],  // 16-color palette (usually unused)
+    pub reserved: u8,        // Reserved byte
+    pub n_planes: u8,        // Number of color planes (1 = single plane)
+    pub bytes_per_line: u16, // Bytes per line (must be even)
     pub palette_info: u16,   // Palette info
-    pub hscreen_size: u16,    // Horizontal screen size
+    pub hscreen_size: u16,   // Horizontal screen size
     pub vscreen_size: u16,   // Vertical screen size
-    pub filler: [u8; 54],     // Filler bytes
+    pub filler: [u8; 54],    // Filler bytes
 }
 
 impl PcxHeader {
     /// Parse PCX header from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 128 {
-            return Err(anyhow::anyhow!("PCX header too small: {} bytes", data.len()));
+            return Err(anyhow::anyhow!(
+                "PCX header too small: {} bytes",
+                data.len()
+            ));
         }
 
         Ok(PcxHeader {
@@ -83,22 +85,22 @@ impl PcxHeader {
 }
 
 /// PCX Image
-/// 
+///
 /// Contains decoded pixel data and optional embedded palette
 #[derive(Debug, Clone)]
 pub struct PcxImage {
     pub width: u16,
     pub height: u16,
-    pub pixels: Vec<u8>,           // 256-color indexed image
-    pub palette: Option<Palette>,  // Optional embedded palette
+    pub pixels: Vec<u8>,          // 256-color indexed image
+    pub palette: Option<Palette>, // Optional embedded palette
 }
 
 impl PcxImage {
     /// Parse PCX file from bytes
-    /// 
+    ///
     /// # Arguments
     /// * `data` - Complete PCX file data
-    /// 
+    ///
     /// # Returns
     /// `Ok(PcxImage)` if parsing succeeds, `Err` if format is invalid
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
@@ -107,8 +109,7 @@ impl PcxImage {
         }
 
         // Parse header
-        let header = PcxHeader::from_bytes(&data[0..128])
-            .context("Failed to parse PCX header")?;
+        let header = PcxHeader::from_bytes(&data[0..128]).context("Failed to parse PCX header")?;
 
         // Validate header
         if header.manufacturer != 0x0A {
@@ -131,7 +132,8 @@ impl PcxImage {
         if width == 0 || height == 0 {
             return Err(anyhow::anyhow!(
                 "Invalid image dimensions: {}x{}",
-                width, height
+                width,
+                height
             ));
         }
 
@@ -157,14 +159,16 @@ impl PcxImage {
         let pixel_data = &data[pixel_data_start..pixel_data_end];
 
         // Decode RLE compressed pixel data
-        let pixels = Self::decode_rle(pixel_data, width, height)
-            .context("Failed to decode PCX RLE data")?;
+        let pixels =
+            Self::decode_rle(pixel_data, width, height).context("Failed to decode PCX RLE data")?;
 
         // Try to read embedded palette
         let palette = if data.len() >= 769 && data[data.len() - 769] == 0x0C {
             let palette_data = &data[data.len() - 768..];
-            Some(Palette::from_bytes(palette_data)
-                .context("Failed to parse embedded PCX palette")?)
+            Some(
+                Palette::from_bytes(palette_data)
+                    .context("Failed to parse embedded PCX palette")?,
+            )
         } else {
             None
         };
@@ -178,18 +182,18 @@ impl PcxImage {
     }
 
     /// Decode PCX RLE compressed data
-    /// 
+    ///
     /// PCX RLE rules:
     /// - If byte <= 0xBF (191): Direct pixel value
-    /// - If byte >= 0xC0 (192): 
+    /// - If byte >= 0xC0 (192):
     ///   - Run length = byte & 0x3F (lower 6 bits)
     ///   - Next byte is the repeated value
-    /// 
+    ///
     /// # Arguments
     /// * `data` - RLE compressed data
     /// * `width` - Image width
     /// * `height` - Image height
-    /// 
+    ///
     /// # Returns
     /// Decoded pixel data
     fn decode_rle(data: &[u8], width: u16, height: u16) -> Result<Vec<u8>> {
@@ -219,7 +223,7 @@ impl PcxImage {
                 } else {
                     // RLE compression
                     let run_length = (byte & PCX_RUN_LENGTH_MASK) as usize;
-                    
+
                     if data_idx >= data.len() {
                         return Err(anyhow::anyhow!(
                             "RLE decode overflow: missing value byte for run length {}",
@@ -265,11 +269,11 @@ impl PcxImage {
     }
 
     /// Convert to RGBA texture data
-    /// 
+    ///
     /// # Arguments
     /// * `palette` - Palette to use for color conversion
     /// * `transparent` - Optional transparent color index (None = no transparency)
-    /// 
+    ///
     /// # Returns
     /// RGBA pixel data (width * height * 4 bytes)
     pub fn to_rgba(&self, palette: &Palette, transparent: Option<u8>) -> Vec<u8> {
@@ -297,19 +301,19 @@ impl PcxImage {
     }
 
     /// Load PCX from MPQ archive
-    /// 
+    ///
     /// # Arguments
     /// * `mpq` - MPQ manager to read from
     /// * `path` - Path to PCX file in MPQ
-    /// 
+    ///
     /// # Returns
     /// `Ok(PcxImage)` if loaded successfully
     pub fn from_mpq(mpq: &mut crate::resources::mpq::MpqManager, path: &str) -> Result<Self> {
-        let data = mpq.find_file(path)
+        let data = mpq
+            .find_file(path)
             .ok_or_else(|| anyhow::anyhow!("PCX file not found in MPQ: {}", path))?;
 
-        Self::from_bytes(&data)
-            .with_context(|| format!("Failed to parse PCX from MPQ: {}", path))
+        Self::from_bytes(&data).with_context(|| format!("Failed to parse PCX from MPQ: {}", path))
     }
 }
 
@@ -322,16 +326,16 @@ mod tests {
         // Create a minimal valid PCX header
         let mut header_data = vec![0u8; 128];
         header_data[0] = 0x0A; // Manufacturer
-        header_data[1] = 5;     // Version
-        header_data[2] = 1;     // Encoding (RLE)
-        header_data[3] = 8;     // Bits per pixel
-        // xmin = 0, ymin = 0
-        // xmax = 99, ymax = 99 (100x100 image)
+        header_data[1] = 5; // Version
+        header_data[2] = 1; // Encoding (RLE)
+        header_data[3] = 8; // Bits per pixel
+                            // xmin = 0, ymin = 0
+                            // xmax = 99, ymax = 99 (100x100 image)
         header_data[8] = 99;
         header_data[9] = 0;
         header_data[10] = 99;
         header_data[11] = 0;
-        header_data[65] = 1;    // n_planes
+        header_data[65] = 1; // n_planes
 
         let header = PcxHeader::from_bytes(&header_data).unwrap();
         assert_eq!(header.manufacturer, 0x0A);
@@ -365,4 +369,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

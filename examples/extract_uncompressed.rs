@@ -1,16 +1,15 @@
 /// MPQ 未压缩文件提取工具
-/// 
+///
 /// 用法: cargo run --example extract_uncompressed
-
 use rust_diablo::resources::mpq::MpqManager;
 use std::fs;
 use std::path::Path;
 
 fn main() {
     let mut manager = MpqManager::new();
-    
+
     println!("=== MPQ 未压缩文件提取工具 ===\n");
-    
+
     // 加载 Diabdat.mpq
     match manager.load_mpq("Diabdat.mpq", 1000) {
         Ok(_) => println!("✔ 成功加载 Diabdat.mpq\n"),
@@ -19,7 +18,7 @@ fn main() {
             return;
         }
     }
-    
+
     // 常见的 palette 文件路径
     let palette_files = vec![
         "levels/towndata/town.pal",
@@ -33,34 +32,33 @@ fn main() {
         "plrgfx/rogue/rl/rl.pal",
         "plrgfx/sorceror/sl/sl.pal",
     ];
-    
+
     let output_dir = "assets/extracted";
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
-    
+
     println!("检查文件状态:\n");
-    
+
     let mut extracted_count = 0;
     let mut failed_count = 0;
-    
+
     for file_path in &palette_files {
         print!("  {} ... ", file_path);
-        
+
         // 检查文件是否存在
         if !manager.has_file(file_path) {
             println!("❌ 不存在");
             continue;
         }
-        
+
         // 尝试读取
         match manager.find_file(file_path) {
             Some(data) => {
                 println!("✔ 成功 ({} 字节)", data.len());
-                
+
                 // 提取到文件
-                let output_path = Path::new(output_dir).join(
-                    Path::new(file_path).file_name().unwrap()
-                );
-                
+                let output_path =
+                    Path::new(output_dir).join(Path::new(file_path).file_name().unwrap());
+
                 match fs::write(&output_path, &data) {
                     Ok(_) => {
                         println!("    → 已保存到: {}", output_path.display());
@@ -78,35 +76,9 @@ fn main() {
             }
         }
     }
-    
+
     println!("\n=== 总结 ===");
     println!("✔ 成功提取: {} 个文件", extracted_count);
     println!("❌ 失败: {} 个文件", failed_count);
     println!("\n提取的文件保存在: {}/", output_dir);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

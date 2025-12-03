@@ -1,5 +1,5 @@
 //! FFI bindings for libmpq
-//! 
+//!
 //! 这个模块提供了 libmpq C 库的 Rust 绑定
 
 #![allow(non_camel_case_types)]
@@ -33,12 +33,12 @@ pub const LIBMPQ_OPEN_EXISTING: c_int = 0;
 #[link(name = "mpq", kind = "static")]
 extern "C" {
     /// 打开 MPQ 存档
-    /// 
+    ///
     /// # 参数
     /// * `mpq_archive` - 输出的存档句柄指针
     /// * `mpq_filename` - MPQ 文件路径
     /// * `mpq_flags` - 打开标志
-    /// 
+    ///
     /// # 返回
     /// 成功返回 0，失败返回错误码
     pub fn libmpq__archive_open(
@@ -51,10 +51,7 @@ extern "C" {
     pub fn libmpq__archive_close(mpq_archive: mpq_archive) -> c_int;
 
     /// 获取存档中的文件数量
-    pub fn libmpq__archive_files(
-        mpq_archive: mpq_archive,
-        number_of_files: *mut c_uint,
-    ) -> c_int;
+    pub fn libmpq__archive_files(mpq_archive: mpq_archive, number_of_files: *mut c_uint) -> c_int;
 
     /// 获取文件编号（检查文件是否存在）
     pub fn libmpq__file_number(
@@ -106,12 +103,9 @@ mod tests {
     #[test]
     fn test_types() {
         // 确保类型大小合理
-        assert_eq!(std::mem::size_of::<mpq_archive>(), std::mem::size_of::<*mut c_void>());
+        assert_eq!(
+            std::mem::size_of::<mpq_archive>(),
+            std::mem::size_of::<*mut c_void>()
+        );
     }
 }
-
-
-
-
-
-

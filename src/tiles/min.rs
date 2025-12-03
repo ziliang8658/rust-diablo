@@ -1,5 +1,7 @@
+pub use crate::tiles::types::DungeonType;
+use crate::tiles::types::LevelCelBlock;
 /// MIN file format loader
-/// 
+///
 /// MIN files contain micro tile (MicroTile) definitions.
 /// Each "Piece" (levelPieceId) corresponds to a stack of micro tiles:
 /// - Town: 16 blocks
@@ -7,13 +9,10 @@
 /// - Catacombs (L2): 10 blocks
 /// - Caves (L3): 10 blocks
 /// - Hell (L4): 12 blocks
-/// 
+///
 /// # References
 /// - Original code: `Source/levels/gendung.cpp::SetDungeonMicros()` Line 509-549
-
 use anyhow::Result;
-use crate::tiles::types::LevelCelBlock;
-pub use crate::tiles::types::DungeonType;
 
 /// A collection of micro tiles that make up a single map piece
 #[derive(Debug, Clone)]
@@ -78,7 +77,7 @@ impl MinData {
             }
             pieces.push(PieceMicros { mt });
         }
-        
+
         // Apply reordering to match DPieceMicros structure (C++ SetDungeonMicros logic)
         // C++ code: pieces[blocks - 2 + (block & 1) - (block & 0xE)]
         // This reorders so that block 0,1 contain floor data (from original block 14,15 for Town)
@@ -86,27 +85,39 @@ impl MinData {
             let raw_mt = piece.mt.clone();
             for block in 0..blocks_per_piece {
                 // C++ formula: blocks - 2 + (block & 1) - (block & 0xE)
-                let src_idx = (blocks_per_piece as isize - 2 + (block as isize & 1) - (block as isize & 0xE)) as usize;
+                let src_idx = (blocks_per_piece as isize - 2 + (block as isize & 1)
+                    - (block as isize & 0xE)) as usize;
                 if src_idx < raw_mt.len() {
                     piece.mt[block] = raw_mt[src_idx];
                 }
             }
         }
 
-        Ok(Self { pieces, blocks_per_piece })
+        Ok(Self {
+            pieces,
+            blocks_per_piece,
+        })
     }
 
-    pub fn from_mpq(mpq_manager: &mut crate::resources::MpqManager, path: &str, dungeon_type: DungeonType) -> Result<Self> {
+    pub fn from_mpq(
+        mpq_manager: &mut crate::resources::MpqManager,
+        path: &str,
+        dungeon_type: DungeonType,
+    ) -> Result<Self> {
         let unix_path = path.replace('\\', "/");
         let windows_path = path.replace('/', "\\");
-        
-        let data = mpq_manager.find_file(&unix_path)
+
+        let data = mpq_manager
+            .find_file(&unix_path)
             .or_else(|| mpq_manager.find_file(&windows_path))
             .ok_or_else(|| anyhow::anyhow!("MIN file not found: {}", path))?;
         Self::from_bytes(&data, dungeon_type)
     }
 
-    pub fn load_for_dungeon(mpq_manager: &mut crate::resources::MpqManager, dungeon_type: DungeonType) -> Result<Self> {
+    pub fn load_for_dungeon(
+        mpq_manager: &mut crate::resources::MpqManager,
+        dungeon_type: DungeonType,
+    ) -> Result<Self> {
         let path = match dungeon_type {
             DungeonType::Town => "levels/towndata/town.min",
             DungeonType::Cathedral => "levels/l1data/l1.min",
