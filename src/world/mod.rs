@@ -443,6 +443,24 @@ impl World {
             (25 - BORDER_SIZE, 25 - BORDER_SIZE)  // Convert from dPiece to world if needed
         };
 
+        // Debug: focus render to the 2x2 region around the view center (in dPiece coordinates).
+        // This is intentionally simple (skip outside tiles) to help isolate rendering issues.
+        // Toggle via F7 (RenderDebugFlags.show_debug_info).
+        let focus_only_2x2 = self.render_debug.show_debug_info;
+        let (focus_min_x, focus_max_x, focus_min_y, focus_max_y) = if focus_only_2x2 {
+            let cx = view_x + BORDER_SIZE;
+            let cy = view_y + BORDER_SIZE;
+            (cx, cx + 1, cy, cy + 1)
+        } else {
+            (0, 0, 0, 0)
+        };
+        if focus_only_2x2 {
+            println!(
+                "[RENDER_FOCUS_2X2] view_world=({}, {}), focus_dpiece_x=[{}..{}], focus_dpiece_y=[{}..{}]",
+                view_x, view_y, focus_min_x, focus_max_x, focus_min_y, focus_max_y
+            );
+        }
+
         // Calculate how many tiles to render
         // C++ uses columns and rows based on screen size
         let columns = (screen_width / TILE_WIDTH) + 2;
@@ -511,6 +529,18 @@ impl World {
                     // Convert world coordinates to dPiece coordinates for array access
                     let dpiece_x = tx + BORDER_SIZE;
                     let dpiece_y = ty + BORDER_SIZE;
+
+                    if focus_only_2x2
+                        && !(dpiece_x >= focus_min_x
+                            && dpiece_x <= focus_max_x
+                            && dpiece_y >= focus_min_y
+                            && dpiece_y <= focus_max_y)
+                    {
+                        tx += 1;
+                        ty -= 1;
+                        sx += 64;
+                        continue;
+                    }
                     if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
                         let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
                         // Check IsFloor
@@ -527,6 +557,12 @@ impl World {
 
                         // Render the tile (frame 311 filtering is done in render_micro_tile)
                         if is_floor {
+                            if focus_only_2x2 {
+                                println!(
+                                    "  - phase=floor dpiece=({}, {}) piece_id={}",
+                                    dpiece_x, dpiece_y, level_piece_id
+                                );
+                            }
                             let _ = self.draw_floor_at(
                                 engine,
                                 texture_mgr_cell,
@@ -598,6 +634,18 @@ impl World {
                     // Convert world coordinates to dPiece coordinates for array access
                     let dpiece_x = tx + BORDER_SIZE;
                     let dpiece_y = ty + BORDER_SIZE;
+
+                    if focus_only_2x2
+                        && !(dpiece_x >= focus_min_x
+                            && dpiece_x <= focus_max_x
+                            && dpiece_y >= focus_min_y
+                            && dpiece_y <= focus_max_y)
+                    {
+                        tx += 1;
+                        ty -= 1;
+                        sx += 64;
+                        continue;
+                    }
                     
                     // Get piece_id (returns 0 if out of bounds, matching C++ behavior)
                     // Reference: C++ DrawTileContent() Line 1031: if (InDungeonBounds(tilePosition))
@@ -620,6 +668,12 @@ impl World {
                     // Reference: C++ DrawTileContent() Line 996 calls DrawDungeon() for ALL tiles
                     // Even if out of bounds (piece_id = 0), we still call draw_cell_at
                     // draw_cell_at will handle piece_id = 0 gracefully (no rendering)
+                    if focus_only_2x2 {
+                        println!(
+                            "  - phase=cell dpiece=({}, {}) piece_id={}",
+                            dpiece_x, dpiece_y, level_piece_id
+                        );
+                    }
                     let _ = self.draw_cell_at(
                         engine,
                         texture_mgr_cell,

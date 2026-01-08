@@ -172,15 +172,33 @@ impl SolData {
     ) -> Result<Self> {
         use crate::tiles::min::DungeonType;
 
-        let path = match dungeon_type {
-            DungeonType::Town => "levels/towndata/town.sol",
-            DungeonType::Cathedral => "levels/l1data/l1.sol",
-            DungeonType::Catacombs => "levels/l2data/l2.sol",
-            DungeonType::Caves => "levels/l3data/l3.sol",
-            DungeonType::Hell => "levels/l4data/l4.sol",
+        let candidates: &[&str] = match dungeon_type {
+            DungeonType::Town => &[
+                // Match DevilutionX C++ preference order (Source/levels/gendung.cpp loads nlevels first)
+                "nlevels/towndata/town.sol",
+                "levels/towndata/town.sol",
+            ],
+            DungeonType::Cathedral => &["levels/l1data/l1.sol"],
+            DungeonType::Catacombs => &["levels/l2data/l2.sol"],
+            DungeonType::Caves => &["levels/l3data/l3.sol"],
+            DungeonType::Hell => &["levels/l4data/l4.sol"],
         };
 
-        let mut sol_data = Self::from_mpq(mpq_manager, path)?;
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut sol_data = None;
+        for path in candidates {
+            match Self::from_mpq(mpq_manager, path) {
+                Ok(result) => {
+                    println!("Loaded SOL: {}", path);
+                    sol_data = Some(result);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        let mut sol_data = sol_data
+            .ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to load SOL file")))?;
 
         // Apply fixes for known issues in original data
         match dungeon_type {

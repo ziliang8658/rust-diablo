@@ -288,15 +288,29 @@ impl TilData {
         mpq_manager: &mut crate::resources::MpqManager,
         dungeon_type: crate::tiles::min::DungeonType,
     ) -> Result<Self> {
-        let path = match dungeon_type {
-            crate::tiles::min::DungeonType::Town => "levels/towndata/town.til",
-            crate::tiles::min::DungeonType::Cathedral => "levels/l1data/l1.til",
-            crate::tiles::min::DungeonType::Catacombs => "levels/l2data/l2.til",
-            crate::tiles::min::DungeonType::Caves => "levels/l3data/l3.til",
-            crate::tiles::min::DungeonType::Hell => "levels/l4data/l4.til",
+        let candidates: &[&str] = match dungeon_type {
+            crate::tiles::min::DungeonType::Town => &[
+                // Match DevilutionX C++ preference order (Source/diablo.cpp loads nlevels first)
+                "nlevels/towndata/town.til",
+                "levels/towndata/town.til",
+            ],
+            crate::tiles::min::DungeonType::Cathedral => &["levels/l1data/l1.til"],
+            crate::tiles::min::DungeonType::Catacombs => &["levels/l2data/l2.til"],
+            crate::tiles::min::DungeonType::Caves => &["levels/l3data/l3.til"],
+            crate::tiles::min::DungeonType::Hell => &["levels/l4data/l4.til"],
         };
 
-        Self::from_mpq(mpq_manager, path)
+        let mut last_err: Option<anyhow::Error> = None;
+        for path in candidates {
+            match Self::from_mpq(mpq_manager, path) {
+                Ok(result) => {
+                    println!("Loaded TIL: {}", path);
+                    return Ok(result);
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to load TIL file")))
     }
 }
 
