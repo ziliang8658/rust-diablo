@@ -248,6 +248,11 @@ let rgba = self.palette.indices_to_rgba(&indexed_pixels, true);
 - RightTrapezoid：下三角+上矩形，右对齐
 - TransparentSquare：有透明像素
 
+> 注意：这里的“左/右对齐”描述的是 **decoder 输出缓冲区** 的几何特征验证（便于做形状/宽度检查），不等价于 C++ `dun_render.cpp` 的逐行渲染布局。
+> 目前 Rust 为了对齐 C++ 的渲染效果，会在 `src/world/mod.rs::render_micro_tile()` 中对
+> `LeftTriangle/RightTriangle/LeftTrapezoid/RightTrapezoid` 做临时像素重排（梯形仅影响下半 16 行）。
+> 后续计划把这部分逻辑迁移到 decode 阶段：`docs/tile-pixel-reordering-requirements.md`。
+
 **测试用例：** 3个
 
 #### 5.2 MPQ验证测试

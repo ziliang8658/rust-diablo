@@ -71,6 +71,12 @@ fn is_line_clear(
     y1: usize,
     block_map: &[[bool; MAXDUNY]; MAXDUNX],
 ) -> bool {
+    // Clamp coordinates to valid range to prevent overflow
+    let x0 = x0.min(MAXDUNX - 1);
+    let y0 = y0.min(MAXDUNY - 1);
+    let x1 = x1.min(MAXDUNX - 1);
+    let y1 = y1.min(MAXDUNY - 1);
+    
     let mut x = x0 as i32;
     let mut y = y0 as i32;
     let dx = (x1 as i32 - x0 as i32).abs();
@@ -80,7 +86,7 @@ fn is_line_clear(
     let mut err = dx - dy;
 
     loop {
-        // Check current point
+        // Check current point (bounds already checked by clamping)
         if x >= 0 && x < MAXDUNX as i32 && y >= 0 && y < MAXDUNY as i32 {
             if block_map[x as usize][y as usize] {
                 return false; // Blocked by wall
@@ -94,11 +100,31 @@ fn is_line_clear(
         let e2 = 2 * err;
         if e2 > -dy {
             err -= dy;
-            x += sx;
+            // Check for overflow before adding
+            let new_x = x.checked_add(sx);
+            if let Some(nx) = new_x {
+                if nx >= 0 && nx < MAXDUNX as i32 {
+                    x = nx;
+                } else {
+                    break; // Out of bounds, stop
+                }
+            } else {
+                break; // Overflow, stop
+            }
         }
         if e2 < dx {
             err += dx;
-            y += sy;
+            // Check for overflow before adding
+            let new_y = y.checked_add(sy);
+            if let Some(ny) = new_y {
+                if ny >= 0 && ny < MAXDUNY as i32 {
+                    y = ny;
+                } else {
+                    break; // Out of bounds, stop
+                }
+            } else {
+                break; // Overflow, stop
+            }
         }
     }
 

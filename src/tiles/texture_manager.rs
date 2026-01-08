@@ -360,7 +360,6 @@ impl TileTextureManager {
     /// * `block_index` - Block index within piece
     ///
     /// # Returns
-    /// Indexed pixel data (32x32 = 1024 bytes)
     pub fn get_indexed_tile_pixels(&mut self, piece_index: usize, block_index: usize) -> Result<Vec<u8>> {
         // Get PieceMicros from MIN data
         let piece = self
@@ -377,136 +376,19 @@ impl TileTextureManager {
             )
         })?;
 
-        if !block.has_value() {
-            // Empty tile - return transparent
-            return Ok(vec![0u8; 32 * 32]);
-        }
-
         // Get TileType and frame index
         let tile_type = block.tile_type();
         let frame_idx = block.frame() as usize;
 
         // Get indexed pixels
         let indexed_pixels = self.get_indexed_tile(frame_idx, tile_type)?;
-        Ok(indexed_pixels.to_vec())
+        let indexed_pixels_vec = indexed_pixels.to_vec();
+        
+
+        Ok(indexed_pixels_vec)
     }
 
-    pub fn get_decoded_tile(&mut self, piece_index: usize, block_index: usize) -> Result<&[u8]> {
-        // Create a unique cache key from piece and block indices
-        let cache_key = piece_index * 16 + block_index;
 
-        // Check cache first
-        if self.decoded_cache.contains_key(&cache_key) {
-            return Ok(&self.decoded_cache[&cache_key]);
-        }
-
-        // Get PieceMicros from MIN data
-        let piece = self
-            .min_data
-            .get(piece_index)
-            .ok_or_else(|| anyhow::anyhow!("Piece index out of range: {}", piece_index))?;
-
-        // Get the specific block
-        let block = piece.mt.get(block_index).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Block index out of range: {} (piece has {} blocks)",
-                block_index,
-                piece.mt.len()
-            )
-        })?;
-
-        if !block.has_value() {
-            // Empty tile - return transparent
-            let size = 32 * 32 * 4; // RGBA
-            let transparent = vec![0u8; size];
-            self.decoded_cache.insert(cache_key, transparent);
-            return Ok(&self.decoded_cache[&cache_key]);
-        }
-
-        // Get TileType and frame index
-        let tile_type = block.tile_type();
-        let frame_idx = block.frame() as usize;
-
-        // Get decoded indexed pixels
-        let indexed_pixels = self.get_indexed_tile(frame_idx, tile_type)?;
-
-        // Clone indexed pixels so we can release the mutable borrow on self
-        let indexed_pixels = indexed_pixels.to_vec();
-
-        // Apply palette to convert to RGBA
-        let rgba_pixels = self.palette.indices_to_rgba(&indexed_pixels, true);
-
-        // Cache and return (no flip - decoder already outputs in correct order)
-        self.decoded_cache.insert(cache_key, rgba_pixels);
-        Ok(&self.decoded_cache[&cache_key])
-    }
-
-    /// Get decoded tile with forced TileType (for floor rendering)
-    ///
-    /// This is used when we need to force a specific TileType for decoding,
-    /// regardless of what's stored in the block (e.g., C++ DrawFloorTile forces Triangle types)
-    ///
-    /// # Arguments
-    /// * `piece_index` - Piece index in MIN data
-    /// * `block_index` - Block index within the piece
-    /// * `forced_tile_type` - TileType to use for decoding (ignores block's stored type)
-    ///
-    /// # Returns
-    /// RGBA pixel data
-    pub fn get_decoded_tile_with_type(
-        &mut self,
-        piece_index: usize,
-        block_index: usize,
-        forced_tile_type: crate::tiles::types::TileType,
-    ) -> Result<&[u8]> {
-        // Create a unique cache key that includes the forced type
-        let cache_key =
-            (piece_index << 24) | (block_index << 16) | ((forced_tile_type as usize) << 8);
-
-        // Check cache first
-        if self.decoded_cache.contains_key(&cache_key) {
-            return Ok(&self.decoded_cache[&cache_key]);
-        }
-
-        // Get PieceMicros from MIN data
-        let piece = self
-            .min_data
-            .get(piece_index)
-            .ok_or_else(|| anyhow::anyhow!("Piece index out of range: {}", piece_index))?;
-
-        // Get the specific block
-        let block = piece.mt.get(block_index).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Block index out of range: {} (piece has {} blocks)",
-                block_index,
-                piece.mt.len()
-            )
-        })?;
-
-        if !block.has_value() {
-            // Empty tile - return transparent
-            let size = 32 * 32 * 4; // RGBA
-            let transparent = vec![0u8; size];
-            self.decoded_cache.insert(cache_key, transparent);
-            return Ok(&self.decoded_cache[&cache_key]);
-        }
-
-        // Get frame index (use block's frame)
-        let frame_idx = block.frame() as usize;
-
-        // Get decoded indexed pixels using FORCED tile type
-        let indexed_pixels = self.get_indexed_tile(frame_idx, forced_tile_type)?;
-
-        // Clone indexed pixels so we can release the mutable borrow on self
-        let indexed_pixels = indexed_pixels.to_vec();
-
-        // Apply palette to convert to RGBA
-        let rgba_pixels = self.palette.indices_to_rgba(&indexed_pixels, true);
-
-        // Cache and return
-        self.decoded_cache.insert(cache_key, rgba_pixels);
-        Ok(&self.decoded_cache[&cache_key])
-    }
 
     /// Get decoded foliage (grass) for floor tiles with TransparentSquare type
     ///
@@ -725,46 +607,6 @@ impl TileTextureManager {
         Ok(&self.indexed_cache[&cache_key])
     }
 
-    /// Preload all tiles into cache
-    ///
-    /// This can be called once at startup to avoid runtime decoding overhead.
-    ///
-    /// # Returns
-    /// Number of tiles successfully preloaded
-    pub fn preload_all(&mut self) -> Result<usize> {
-        println!("\n=== Preloading Tiles ===");
-        let num_pieces = self.min_data.len();
-        let blocks_per_piece = self.min_data.blocks_per_piece;
-        let mut loaded = 0;
-        let mut errors = 0;
-
-        for piece_idx in 0..num_pieces {
-            for block_idx in 0..blocks_per_piece {
-                match self.get_decoded_tile(piece_idx, block_idx) {
-                    Ok(_) => loaded += 1,
-                    Err(e) => {
-                        if errors < 5 {
-                            eprintln!(
-                                "Failed to preload tile ({}, {}): {}",
-                                piece_idx, block_idx, e
-                            );
-                        }
-                        errors += 1;
-                    }
-                }
-            }
-        }
-
-        println!("  Preloaded: {} tiles", loaded);
-        println!("  Errors: {}", errors);
-        println!(
-            "  Cache size: {} decoded, {} indexed",
-            self.decoded_cache.len(),
-            self.indexed_cache.len()
-        );
-
-        Ok(loaded)
-    }
 
     /// Get a CEL frame by index (supports both main and special CEL)
     ///

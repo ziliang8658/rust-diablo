@@ -113,9 +113,6 @@ impl DungeonMap {
     }
 
     /// Check if coordinates are within dungeon bounds
-    ///
-    /// # Reference
-    /// Original: `Source/levels/gendung.h` Line 200
     pub fn in_bounds(&self, x: i32, y: i32) -> bool {
         x >= 0 && x < MAXDUNX as i32 && y >= 0 && y < MAXDUNY as i32
     }

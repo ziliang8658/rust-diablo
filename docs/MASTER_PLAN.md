@@ -401,6 +401,7 @@ texture_manager.rs       →     gendung.cpp:1235-1264
 - ⏸️ 实际纹理渲染到屏幕
 - ⏸️ 光照系统集成
 - ⏸️ 透明度和alpha混合
+- ⏸️ Tile 像素对齐重排从渲染阶段迁移到 decode 阶段（当前在 `World::render_micro_tile()` 内临时处理 Triangle/Trapezoid；见 `docs/tile-pixel-reordering-requirements.md`）
 
 **相关文档**：
 - [Step 6.2 设计文档](step-6.2-map-tile-rendering.md)

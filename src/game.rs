@@ -1,4 +1,5 @@
 use crate::assets::AssetPaths;
+use crate::debug::RenderDebugFlags;
 use crate::engine::Direction;
 use crate::engine::Engine;
 use crate::entity::Entity;
@@ -119,6 +120,9 @@ pub struct Game {
     resource_manager: Option<ResourceManager>,
     town_scene: Option<SimpleTown>,
     current_scene: SceneType,
+
+    // Render debug flags (for controlling rendering phases)
+    render_debug: RenderDebugFlags,
 }
 
 impl Game {
@@ -188,19 +192,15 @@ impl Game {
             default_palette
         };
 
-        // Create world using Diablo 1 dimensions
-        // Reference: Source/levels/gendung.cpp - DMAXX=40, DMAXY=40 (MegaTile scale)
-        // For test world, we use orthogonal tiles (32px) matching the original test setup
-        // Note: Actual dungeon uses isometric tiles (64x32px) but test world uses orthogonal
         let tile_size = 32;
         let map_width = 112; // Match DMAXX from original code
         let map_height = 112; // Match DMAXY from original code
         let mut world = World::new(map_width, map_height, tile_size, &palette);
 
-        // Create player at center
-        let center_x = (map_width as u32 * tile_size) as i32 / 2;
-        let center_y = (map_height as u32 * tile_size) as i32 / 2;
-        let player = Entity::create_player(Point::new(center_x, center_y));
+        // Create player at center (tile coordinates)
+        let center_tile_x = (map_width / 2) as i32;
+        let center_tile_y = (map_height / 2) as i32;
+        let player = Entity::create_player(Point::new(center_tile_x, center_tile_y));
         world.add_entity(player);
         let player_index = 0;
 
@@ -264,17 +264,6 @@ impl Game {
                     Ok(palette) => {
                         println!("✓ Loaded palette: {}", path);
                         println!("  Palette size: {} colors", palette.len());
-
-                        // Print first 10 colors
-                        println!("  First 10 colors:");
-                        for i in 0..10.min(256) {
-                            let color = palette.colors[i];
-                            println!(
-                                "    Color {}: RGB({}, {}, {})",
-                                i, color.r, color.g, color.b
-                            );
-                        }
-
                         // Test RGBA conversion
                         let test_rgba = palette.to_rgba(0, true);
                         println!(
@@ -311,11 +300,6 @@ impl Game {
                 println!("    - {}", archive);
             }
         }
-
-        println!("=== Step 5.1 Test Complete ===\n");
-
-        // Step 5.2: PCX and CLX Integration
-        println!("=== Step 5.2: PCX and CLX Integration ===");
 
         // Phase 4: Load PCX background (logo)
         if mpq_loaded {
@@ -711,21 +695,6 @@ impl Game {
                                 );
                             }
                         }
-
-                        // Debug: Check piece 856 (the problematic one)
-                        if let Some(piece) = min_data.pieces.get(856) {
-                            println!("\n=== Piece 856 Blocks (PROBLEMATIC) ===");
-                            for (i, block) in piece.mt.iter().enumerate() {
-                                println!(
-                                    "  block[{}]: data={:#06x} has_value={} frame={} type={:?}",
-                                    i,
-                                    block.data,
-                                    block.has_value(),
-                                    block.frame(),
-                                    block.tile_type()
-                                );
-                            }
-                        }
                         // Load all Town sectors directly to dPiece (like C++ FillSector)
                         // Town default piece is 218 (used for empty areas)
                         let default_piece = 218u16;
@@ -776,31 +745,6 @@ impl Game {
                             }
                         }
                         println!("✓ Town tiles integrated into World");
-                        // Move player to a floor tile
-                        if let Some(ref dm) = world.dungeon_map {
-                            // Find a floor tile for player spawn
-                            // Floor tile 13 -> TIL[12] -> pieces 22, 1, 6, 3
-                            // Search from center of map area
-                            'outer: for y in 30..80 {
-                                for x in 30..80 {
-                                    let piece = dm.d_piece[x][y];
-                                    // Floor pieces from TIL[12]: 22, 1, 6, 3
-                                    // Also check for common floor pieces
-                                    if piece == 22 || piece == 1 || piece == 6 || piece == 3 {
-                                        // Convert dPiece coords to world coords
-                                        let world_x = ((x as i32 - 16) * 32) as i32;
-                                        let world_y = ((y as i32 - 16) * 32) as i32;
-                                        if let Some(player) = world.get_entity_mut(0) {
-                                            player.position =
-                                                crate::math::Point::new(world_x, world_y);
-                                            println!("✓ Player moved to floor at d_piece[{},{}], world ({},{})", x, y, world_x, world_y);
-                                        }
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                        }
-
                         // Mark that we're using texture manager mode
                         texture_manager_opt = Some(true);
                     } else {
@@ -831,6 +775,7 @@ impl Game {
             resource_manager: resource_manager_opt,
             town_scene: town_scene_opt,
             current_scene: SceneType::TestWorld, // Start with test world
+            render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
         })
     }
 
@@ -923,6 +868,71 @@ impl Game {
             sdl2::keyboard::Keycode::F2 => {
                 self.switch_scene(SceneType::TownPreview);
             }
+            // Render Debug: Toggle Floor Layer (Phase 1)
+            sdl2::keyboard::Keycode::F4 => {
+                self.render_debug.render_floor = !self.render_debug.render_floor;
+                println!(
+                    "\n🎨 === Render Debug: Floor Layer {} ===",
+                    if self.render_debug.render_floor { "ON" } else { "OFF" }
+                );
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Toggle Wall Layer (Phase 2)
+            sdl2::keyboard::Keycode::F5 => {
+                self.render_debug.render_walls = !self.render_debug.render_walls;
+                println!(
+                    "\n🎨 === Render Debug: Wall Layer {} ===",
+                    if self.render_debug.render_walls { "ON" } else { "OFF" }
+                );
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Toggle Entity Layer
+            sdl2::keyboard::Keycode::F6 => {
+                self.render_debug.render_entities = !self.render_debug.render_entities;
+                println!(
+                    "\n🎨 === Render Debug: Entity Layer {} ===",
+                    if self.render_debug.render_entities { "ON" } else { "OFF" }
+                );
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Toggle Debug Info
+            sdl2::keyboard::Keycode::F7 => {
+                self.render_debug.show_debug_info = !self.render_debug.show_debug_info;
+                println!(
+                    "\n🎨 === Render Debug: Debug Info {} ===",
+                    if self.render_debug.show_debug_info { "ON" } else { "OFF" }
+                );
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Reset All Layers
+            sdl2::keyboard::Keycode::F8 => {
+                self.render_debug = RenderDebugFlags {
+                    render_floor: true,
+                    render_walls: true,
+                    render_entities: true,
+                    show_debug_info: false,
+                };
+                println!("\n🎨 === Render Debug: All Layers RESET (All Enabled) ===");
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Set Floor Only Mode
+            sdl2::keyboard::Keycode::F9 => {
+                self.render_debug = RenderDebugFlags::floor_only();
+                println!("\n🎨 === Render Debug: Floor Only Mode ===");
+                self.print_render_debug_status();
+                // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
             _ => {}
         }
     }
@@ -961,6 +971,32 @@ impl Game {
         // Placeholder for future mouse handling
     }
 
+    /// Print render debug status (like C++ PrintStatus)
+    fn print_render_debug_status(&self) {
+        println!("┌─────────────────────────────────┐");
+        println!("│ Render Layer Status             │");
+        println!("├─────────────────────────────────┤");
+        println!(
+            "│ Floor Layer (F4):     {:5} │",
+            if self.render_debug.render_floor { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Wall Layer (F5):      {:5} │",
+            if self.render_debug.render_walls { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Entity Layer (F6):    {:5} │",
+            if self.render_debug.render_entities { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Debug Info (F7):      {:5} │",
+            if self.render_debug.show_debug_info { "ON" } else { "OFF" }
+        );
+        println!("│ Reset All (F8)                  │");
+        println!("│ Floor Only (F9)                 │");
+        println!("└─────────────────────────────────┘");
+    }
+
     /// Update game logic
     ///
     /// This is where all game state updates happen:
@@ -976,94 +1012,88 @@ impl Game {
             .as_secs_f32();
         self.last_frame_time = current_time;
 
-        // Step 4.1: 计算玩家移动方向
-        let mut move_x = 0.0;
-        let mut move_y = 0.0;
-
-        if self.key_up {
-            move_y -= 1.0;
+        // Tile-based movement: Handle player input
+        // First, determine direction from input
+        let mut direction = Direction::None;
+        if self.key_up && self.key_left {
+            direction = Direction::NorthWest;
+        } else if self.key_up && self.key_right {
+            direction = Direction::NorthEast;
+        } else if self.key_down && self.key_left {
+            direction = Direction::SouthWest;
+        } else if self.key_down && self.key_right {
+            direction = Direction::SouthEast;
+        } else if self.key_up {
+            direction = Direction::North;
+        } else if self.key_down {
+            direction = Direction::South;
+        } else if self.key_left {
+            direction = Direction::West;
+        } else if self.key_right {
+            direction = Direction::East;
         }
-        if self.key_down {
-            move_y += 1.0;
-        }
-        if self.key_left {
-            move_x -= 1.0;
-        }
-        if self.key_right {
-            move_x += 1.0;
-        }
 
-        // 更新玩家方向和动画
-        if let Some(player) = self.world.get_entity_mut(self.player_index) {
-            let direction = Direction::from_velocity(move_x, move_y);
-
-            player.set_direction(direction);
-
-            // 根据方向切换动画状态
-            let new_state = if direction.is_moving() {
-                AnimationState::Walk
-            } else {
-                AnimationState::Idle
-            };
-
-            if let Some(ref mut anim) = player.animation {
-                let old_state = anim.current_state();
-                anim.set_state(new_state);
-
-                // DEBUG: 输出状态切换
-                if old_state != new_state {
-                    println!(
-                        "\x1b[33m>>> Animation State Changed: {:?} -> {:?}\x1b[0m",
-                        old_state, new_state
-                    );
+        // Try to start walking
+        // First, check player state and calculate target tile (immutable borrow)
+        let (should_start_walk, can_walk) = if direction.is_moving() {
+            if let Some(player) = self.world.entities().get(self.player_index) {
+                if !player.walking {
+                    // Calculate target tile
+                    let (dx, dy) = direction.to_tile_offset();
+                    let target = Point::new(player.tile_position.x + dx, player.tile_position.y + dy);
+                    // Check collision before mutable borrow
+                    // Use World::is_tile_walkable which handles coordinate conversion correctly
+                    let walkable = self.world.is_tile_walkable(target.x, target.y);
+                    (true, walkable)
+                } else {
+                    (false, false)
                 }
+            } else {
+                (false, false)
             }
+        } else {
+            (false, false)
+        };
 
-            // Note: Animation frames are now handled by the sprite sheet
-            // No need to change color/size based on animation state
+        // Then, get player mutably and start walking or update direction
+        if should_start_walk && can_walk {
+            // Now get player mutably and start walking
+            // We already checked collision, so pass None to skip the check in start_walk
+            if let Some(player) = self.world.get_entity_mut(self.player_index) {
+                let _ = player.start_walk::<fn(i32, i32) -> bool>(direction, None);
+            }
+        } else if !direction.is_moving() {
+            // No input, just update facing direction
+            if let Some(player) = self.world.get_entity_mut(self.player_index) {
+                player.set_direction(direction);
+            }
         }
 
-        // Update world (includes physics and collision)
+        // Update world (includes tile-based entity updates)
         match self.current_scene {
             SceneType::TestWorld => {
                 // Use normal world update with tile collision
                 self.world.update(dt);
             }
             SceneType::TownPreview => {
-                // For town scene, we handle collision manually
-                // First, save player position
-                let player_pos_before =
-                    if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                        player.position
-                    } else {
-                        Point::new(0, 0)
-                    };
-
-                // Update world physics
+                // For town scene, update world (tile-based movement)
                 self.world.update(dt);
-
-                // Apply town-specific collision
-                if let Some(ref town) = self.town_scene {
-                    if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                        let new_x = player.position.x as f32;
-                        let new_y = player.position.y as f32;
-
-                        // Check if new position is walkable
-                        if !town.is_walkable(new_x, new_y) {
-                            // Revert to previous position
-                            player.position = player_pos_before;
-                            player.velocity = Point::new(0, 0);
-                        }
-                    }
-                }
+                // Town-specific collision is now handled in World::update()
             }
         }
 
-        // Update camera to follow player
+        // Update camera to follow player (convert tile position to pixel position)
+        let tile_size = self.world.tile_size;
         let player_pos = self
             .world
             .get_entity_mut(self.player_index)
-            .map(|player| player.position);
+            .map(|player| {
+                // Convert tile position to world pixel position
+                Point::new(
+                    player.tile_position.x * tile_size as i32,
+                    player.tile_position.y * tile_size as i32,
+                )
+            });
 
         if let Some(pos) = player_pos {
             match self.current_scene {
@@ -1077,13 +1107,8 @@ impl Game {
                 }
             }
 
-            // DEBUG: Camera info (only when moving)
-            if move_x != 0.0 || move_y != 0.0 {
-                // println!("\n=== Camera Update ===");
-                // println!("Player Pos: {:?}", pos);
-                // println!("Camera Pos: {:?}", self.camera.position);
-                // println!("Visible: {}", self.camera.is_visible(pos));
-            }
+            // Update camera to follow player (tile-based)
+            // Camera follows player's world pixel position
         }
 
         Ok(())
@@ -1098,6 +1123,9 @@ impl Game {
     /// - Present to screen
     fn render(&mut self) -> Result<()> {
         self.engine.clear()?;
+
+        // Sync render_debug flags with world before rendering
+        self.world.render_debug = self.render_debug.clone();
 
         // Render based on current scene
         match self.current_scene {
@@ -1123,9 +1151,10 @@ impl Game {
             println!("Switching scene: {:?} -> {:?}", self.current_scene, scene);
             self.current_scene = scene;
 
-            // Reset player velocity when switching scenes
+            // Reset player walking state when switching scenes
             if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                player.velocity = Point::new(0, 0);
+                player.walking = false;
+                player.walk_direction = None;
             }
         }
     }
@@ -1148,9 +1177,11 @@ impl Game {
             }
 
             // Render player in town
+            // Extract tile_size before mutable borrow
+            let tile_size = self.world.tile_size;
             if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                // Determine animation state
-                let is_moving = player.velocity.x != 0 || player.velocity.y != 0;
+                // Determine animation state (tile-based: use walking flag)
+                let is_moving = player.walking;
                 let sprite_base = "warrior_town";
                 let state = if is_moving { "walk" } else { "idle" };
 
@@ -1170,9 +1201,11 @@ impl Game {
 
                         let texture_id = &texture_ids[frame_index];
 
-                        // Calculate player position on screen (centered)
-                        let player_screen_x = player.position.x - (player.size.0 as i32 / 2);
-                        let player_screen_y = player.position.y - (player.size.1 as i32 / 2);
+                        // Calculate player position on screen (convert tile to pixel, then to screen)
+                        let player_world_pixel_x = player.tile_position.x * tile_size as i32;
+                        let player_world_pixel_y = player.tile_position.y * tile_size as i32;
+                        let player_screen_x = player_world_pixel_x - (player.size.0 as i32 / 2);
+                        let player_screen_y = player_world_pixel_y - (player.size.1 as i32 / 2);
 
                         let player_rect = Rect::new(
                             player_screen_x,
@@ -1195,3 +1228,4 @@ impl Game {
         Ok(())
     }
 }
+

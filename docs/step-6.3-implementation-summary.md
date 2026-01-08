@@ -512,6 +512,12 @@ fn draw_cell_at(
 
 **修改**: 将原来的临时纹理创建改为使用 `TextureCache`。
 
+**补充：Tile 像素对齐（临时在渲染阶段处理）**
+- 背景：DevilutionX C++ 在 `dun_render.cpp` 对 Triangle/Trapezoid 使用“packed rows + 每行水平偏移”的方式渲染（例如 `RenderLeftTriangleLower` / `RenderRightTriangleLower` / `RenderTrapezoidUpperHalf`），与 Rust decoder 输出的 32 宽 padded 行缓冲存在水平对齐差异。
+- 现状：Rust 当前在 `World::render_micro_tile()` 内对 `LeftTriangle/RightTriangle/LeftTrapezoid/RightTrapezoid` 做临时像素重排以匹配 C++ 的渲染布局（梯形仅影响下半 16 行；上半矩形部分不需要重排）。
+- TODO：后续将该重排逻辑迁移到 decode 阶段，使 `decode_tile()` 的输出可直接渲染，避免 render 阶段做 tile-type 特化处理。
+- 记录文档：`docs/tile-pixel-reordering-requirements.md`
+
 **原代码**:
 ```rust
 // 旧实现：每次都创建临时纹理

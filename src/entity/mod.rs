@@ -20,40 +20,44 @@ pub enum EntityType {
 /// Entity - Basic game object
 ///
 /// Represents any game object that has a position and can be rendered.
+/// Uses tile-based position system (like C++ ActorPosition.tile)
 #[derive(Clone)]
 pub struct Entity {
     pub entity_type: EntityType,
-    pub position: Point,
+    /// Tile position in world coordinates (like C++ position.tile)
+    pub tile_position: Point,
     pub size: (u32, u32),
     pub color: Color,
-    pub velocity: Point,
     pub use_sprite: bool,
     pub sprite_id: Option<String>,
     pub animation: Option<AnimationController>,
 
-    // Step 4.1: 新增字段
+    // Tile-based movement fields
     pub direction: Direction, // 当前方向
-    pub speed: f32,           // 移动速度（像素/秒）
-
-    // 浮点精度位置（用于累积小数移动，避免舍入误差）
-    pub position_f: (f32, f32),
+    pub walking: bool,         // 是否正在行走
+    pub walk_direction: Option<Direction>, // 当前行走方向（如果正在行走）
 }
 
 impl Entity {
     /// Create a new entity
-    pub fn new(entity_type: EntityType, position: Point, size: (u32, u32), color: Color) -> Self {
+    /// 
+    /// # Arguments
+    /// * `entity_type` - Type of entity
+    /// * `tile_position` - Initial tile position in world coordinates
+    /// * `size` - Entity size in pixels (for rendering)
+    /// * `color` - Entity color
+    pub fn new(entity_type: EntityType, tile_position: Point, size: (u32, u32), color: Color) -> Self {
         Self {
             entity_type,
-            position,
+            tile_position,
             size,
             color,
-            velocity: Point::zero(),
             use_sprite: false,
             sprite_id: None,
             animation: None,
             direction: Direction::None,
-            speed: 100.0, // 默认速度：100像素/秒
-            position_f: (position.x as f32, position.y as f32),
+            walking: false,
+            walk_direction: None,
         }
     }
 
@@ -85,10 +89,10 @@ impl Entity {
     /// - `Source/playerdat.hpp:158-213` - PlayerAnimData 结构
     /// - `Source/playerdat.hpp:129-156` - PlayerSpriteData 结构
     /// - `game.rs:467-490` - 实际的精灵加载代码
-    pub fn create_player(position: Point) -> Self {
+    pub fn create_player(tile_position: Point) -> Self {
         let mut entity = Self::new(
             EntityType::Player,
-            position,
+            tile_position,
             (96, 96), // Diablo 1 warrior sprite: 96x96 pixels (frame_width from CL2)
             Color::CYAN,
         );
@@ -96,7 +100,6 @@ impl Entity {
         // Enable sprite rendering
         entity.use_sprite = true;
         entity.sprite_id = Some("warrior_town".to_string()); // 匹配 resource_manager 中的加载
-        entity.speed = 200.0; // 玩家速度：200像素/秒
 
         // Initialize animation controller with placeholder frames
         //
@@ -140,101 +143,150 @@ impl Entity {
         entity
     }
 
-    /// Get the bounding rectangle for this entity
-    pub fn bounds(&self) -> Rect {
-        Rect::from_center(self.position, self.size.0, self.size.1)
+    /// Get the bounding rectangle for this entity in world pixel coordinates
+    /// 
+    /// Note: This converts tile position to pixel position for rendering.
+    /// The actual position is stored as tile coordinates.
+    pub fn bounds(&self, tile_size: u32) -> Rect {
+        let pixel_x = self.tile_position.x * tile_size as i32;
+        let pixel_y = self.tile_position.y * tile_size as i32;
+        Rect::from_center(Point::new(pixel_x, pixel_y), self.size.0, self.size.1)
     }
 
-    /// Update entity position based on velocity
-    pub fn update(&mut self, dt: f32, collision_info: Option<(&CollisionMap, u32)>) {
-        // Apply velocity with delta time
-        // Velocity is in pixels/second, so multiply by dt to get pixels/frame
-
-        // Calculate potential new position
-        let move_x = self.velocity.x as f32 * dt;
-        let move_y = self.velocity.y as f32 * dt;
-
-        let mut new_pos_f = self.position_f;
-        new_pos_f.0 += move_x;
-        new_pos_f.1 += move_y;
-
-        let new_pos = Point::new(new_pos_f.0.round() as i32, new_pos_f.1.round() as i32);
-
-        // Check collision if map is provided
-        if let Some((map, tile_size)) = collision_info {
-            // Only validate if we actually moved
-            if new_pos != self.position {
-                let validated_pos = map.validate_move(self.position, new_pos, self.size, tile_size);
-
-                // If position was adjusted (collision occurred), update float position to match
-                if validated_pos != new_pos {
-                    // Update float position to match the validated integer position
-                    // This prevents "stuck" float values drifting from visual position
-                    self.position_f.0 = validated_pos.x as f32;
-                    self.position_f.1 = validated_pos.y as f32;
-                    self.position = validated_pos;
-                } else {
-                    // No collision, apply movement
-                    self.position_f = new_pos_f;
-                    self.position = new_pos;
-                }
-            } else {
-                // Integer position didn't change (sub-pixel movement)
-                // We must still update position_f to accumulate the movement
-                // Since integer pos didn't change, we are safe from collision
-                self.position_f = new_pos_f;
-            }
-        } else {
-            // No collision check, just apply movement
-            self.position_f = new_pos_f;
-            self.position = new_pos;
-        }
-
+    /// Update entity (tile-based movement system)
+    /// 
+    /// Similar to C++ DoWalk: checks if walking animation is complete,
+    /// and if so, updates tile_position to the new tile.
+    /// 
+    /// # Arguments
+    /// * `dt` - Delta time in seconds
+    /// * `is_walkable_fn` - Optional function to check if a tile is walkable (world_x, world_y) -> bool
+    pub fn update<F>(&mut self, dt: f32, is_walkable_fn: Option<F>)
+    where
+        F: Fn(i32, i32) -> bool,
+    {
         // Update animation
         if let Some(ref mut anim) = self.animation {
             anim.update(dt);
         }
+
+        // If walking, check if animation is complete
+        if self.walking {
+            if let Some(ref anim) = self.animation {
+                // Check if animation reached last frame (like C++ AnimInfo.isLastFrame())
+                // For now, we'll use a simple time-based check
+                // TODO: Implement proper frame-based check when animation system supports it
+                if let Some(walk_dir) = self.walk_direction {
+                    // Calculate target tile
+                    let target_tile = self.calculate_target_tile(walk_dir);
+                    
+                    // Check if we can move to target tile (collision check)
+                    let can_move = if let Some(check_fn) = &is_walkable_fn {
+                        check_fn(target_tile.x, target_tile.y)
+                    } else {
+                        true // No collision check, allow movement
+                    };
+
+                    if can_move {
+                        // For now, we'll move immediately when walking starts
+                        // TODO: Wait for animation to complete (like C++ DoWalk)
+                        // This requires proper animation frame tracking
+                        self.tile_position = target_tile;
+                        self.walking = false;
+                        self.walk_direction = None;
+                        
+                        // Switch back to idle animation
+                        if let Some(ref mut anim) = self.animation {
+                            anim.set_state(AnimationState::Idle);
+                        }
+                    } else {
+                        // Collision detected, stop walking
+                        self.walking = false;
+                        self.walk_direction = None;
+                        if let Some(ref mut anim) = self.animation {
+                            anim.set_state(AnimationState::Idle);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    /// Set velocity
-    pub fn set_velocity(&mut self, velocity: Point) {
-        self.velocity = velocity;
+    /// Calculate target tile for a given direction
+    fn calculate_target_tile(&self, direction: Direction) -> Point {
+        let (dx, dy) = direction.to_tile_offset();
+        Point::new(self.tile_position.x + dx, self.tile_position.y + dy)
     }
 
-    /// Move in a direction
-    pub fn move_by(&mut self, delta: Point) {
-        self.position = self.position + delta;
-        self.position_f.0 = self.position.x as f32;
-        self.position_f.1 = self.position.y as f32;
+    /// Move entity by tile offset
+    pub fn move_by_tile(&mut self, delta: Point) {
+        self.tile_position = self.tile_position + delta;
     }
 
-    /// Check if this entity collides with another
-    pub fn collides_with(&self, other: &Entity) -> bool {
-        self.bounds().intersects(&other.bounds())
+    /// Check if this entity collides with another (tile-based)
+    pub fn collides_with_tile(&self, other: &Entity) -> bool {
+        self.tile_position == other.tile_position
     }
 
-    // Step 4.1: 新增方法
+    /// Start walking in a direction (like C++ HandleWalkMode)
+    /// 
+    /// # Arguments
+    /// * `direction` - Direction to walk
+    /// * `is_walkable_fn` - Optional function to check if a tile is walkable (world_x, world_y) -> bool
+    /// 
+    /// # Returns
+    /// `true` if walk started successfully, `false` if target tile is not walkable
+    pub fn start_walk<F>(&mut self, direction: Direction, is_walkable_fn: Option<F>) -> bool
+    where
+        F: Fn(i32, i32) -> bool,
+    {
+        // Don't start new walk if already walking
+        if self.walking {
+            return false;
+        }
 
-    /// Set direction and update velocity accordingly
-    ///
-    /// This will automatically calculate velocity based on direction and speed.
-    /// The velocity vector is normalized for diagonal directions.
+        // Calculate target tile
+        let target_tile = self.calculate_target_tile(direction);
+
+        // Check if target tile is walkable
+        let can_walk = if let Some(check_fn) = &is_walkable_fn {
+            check_fn(target_tile.x, target_tile.y)
+        } else {
+            true // No collision check, allow movement
+        };
+
+        if !can_walk {
+            return false;
+        }
+
+        // Start walking
+        self.direction = direction;
+        self.walking = true;
+        self.walk_direction = Some(direction);
+
+        // Switch to walk animation
+        if let Some(ref mut anim) = self.animation {
+            anim.set_state(AnimationState::Walk);
+        }
+
+        true
+    }
+
+    /// Check if entity can walk in a direction
+    pub fn can_walk<F>(&self, direction: Direction, is_walkable_fn: Option<F>) -> bool
+    where
+        F: Fn(i32, i32) -> bool,
+    {
+        let target_tile = self.calculate_target_tile(direction);
+        if let Some(check_fn) = &is_walkable_fn {
+            check_fn(target_tile.x, target_tile.y)
+        } else {
+            true
+        }
+    }
+
+    /// Set direction (for facing, not movement)
     pub fn set_direction(&mut self, direction: Direction) {
         self.direction = direction;
-        self.update_velocity_from_direction();
-    }
-
-    /// Update velocity based on current direction and speed
-    ///
-    /// Uses normalized direction vector to ensure consistent speed in all directions.
-    /// Note: Velocity is stored as i32 but represents pixels per second.
-    /// The actual movement is calculated in update() by multiplying with dt.
-    pub fn update_velocity_from_direction(&mut self) {
-        let (vx, vy) = self.direction.to_unit_vector();
-
-        // Store velocity as pixels/second (will be multiplied by dt in update())
-        // We keep it as i32 for simplicity, understanding that we lose some precision
-        // but this is acceptable for pixel-based movement
-        self.velocity = Point::new((vx * self.speed) as i32, (vy * self.speed) as i32);
     }
 }

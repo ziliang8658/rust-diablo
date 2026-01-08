@@ -30,9 +30,10 @@ impl Camera {
     }
 
     /// Follow a target point (usually player center)
-    /// Keeps the target in the center of the screen
+    /// Keeps the target in the center of the viewport
+    /// For now, we don't consider panel - just use the full viewport
     pub fn follow(&mut self, target: Point) {
-        // Calculate desired position (target in center)
+        // Calculate desired position (target in center of viewport)
         let mut x = target.x - (self.viewport_width as i32 / 2);
         let mut y = target.y - (self.viewport_height as i32 / 2);
 

@@ -1,4 +1,5 @@
 mod assets;
+mod debug;
 mod engine;
 mod entity;
 /// Rust Diablo - A Rust rewrite of Diablo 1
@@ -32,6 +33,15 @@ fn main() -> Result<()> {
     println!("  ESC - Quit");
     println!("  F1 - Cathedral Dungeon (Step 6.1 Tiles System)");
     println!("  F2 - Town Preview (Step 5.3)");
+    println!("\nRendering Debug (for troubleshooting):");
+    println!("  F4 - Toggle Floor Layer");
+    println!("  F5 - Toggle Wall Layer");
+    println!("  F6 - Toggle Entity Layer");
+    println!("  F7 - Toggle Debug Info");
+    println!("  F8 - Reset All Layers (All Enabled)");
+    println!("  F9 - Floor Only Mode (for debugging)");
+    println!("\nNote: Default mode is FLOOR ONLY for easier debugging.");
+    println!("      Press F8 to enable all layers for normal gameplay.");
     println!("===============================================\n");
 
     run_game()

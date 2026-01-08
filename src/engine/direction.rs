@@ -116,6 +116,26 @@ impl Direction {
                 | Direction::NorthWest
         )
     }
+
+    /// 转换为 tile 偏移量（整数）
+    ///
+    /// # Returns
+    /// (dx, dy) 元组，表示在 tile 坐标系统中的偏移量
+    /// - dx: X 方向偏移（-1, 0, 或 1）
+    /// - dy: Y 方向偏移（-1, 0, 或 1）
+    pub fn to_tile_offset(&self) -> (i32, i32) {
+        match self {
+            Direction::None => (0, 0),
+            Direction::North => (0, -1),
+            Direction::NorthEast => (1, -1),
+            Direction::East => (1, 0),
+            Direction::SouthEast => (1, 1),
+            Direction::South => (0, 1),
+            Direction::SouthWest => (-1, 1),
+            Direction::West => (-1, 0),
+            Direction::NorthWest => (-1, -1),
+        }
+    }
 }
 
 impl Default for Direction {

@@ -1,3 +1,4 @@
+use crate::debug::RenderDebugFlags;
 use crate::engine::Engine;
 use crate::entity::Entity;
 /// World module - Game world and level system
@@ -14,6 +15,7 @@ use crate::sprite::AnimationState;
 use crate::tiles::{texture_manager::TileTextureManager, MinData, SolData, TilData};
 use anyhow::Result;
 use std::cell::RefCell;
+use sdl2::log;
 
 pub mod collision;
 pub mod dungeon_map;
@@ -49,6 +51,9 @@ pub struct World {
 
     // Step 6.4.1: Lighting system
     pub lighting: LightingSystem,
+
+    // Render debug flags (for controlling rendering phases)
+    pub render_debug: RenderDebugFlags,
 }
 
 // Isometric projection constants
@@ -114,6 +119,7 @@ impl World {
             texture_manager: None,
             dungeon_map: None,
             lighting,
+            render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
         }
     }
 
@@ -132,24 +138,29 @@ impl World {
         &self.entities
     }
 
-    /// Update all entities
+    /// Update all entities (tile-based movement system)
     pub fn update(&mut self, dt: f32) {
-        // If we have tile data loaded, use tile-based collision
-        // Otherwise use the legacy collision map
-        if self.min_data.is_some() && self.sol_data.is_some() {
-            // Tile-based collision (Step 6.1)
-            // For now, disable collision to allow free movement
-            // TODO: Implement proper tile-based collision detection
-            for entity in &mut self.entities {
-                entity.update(dt, None);
-            }
-        } else {
-            // Legacy collision map
-            let tile_size = self.tile_size;
-            let map = &self.collision_map;
-
-            for entity in &mut self.entities {
-                entity.update(dt, Some((map, tile_size)));
+        // Update entities with tile-based collision
+        // Extract dungeon_map reference before the mutable borrow to avoid borrow checker issues
+        // Simplified: only check if position is within bounds
+        use crate::engine::isometric::BORDER_SIZE;
+        
+        // Get dungeon_map reference before borrowing entities mutably
+        let dungeon_map_opt = self.dungeon_map.as_ref();
+        
+        for entity in &mut self.entities {
+            if let Some(dungeon_map) = dungeon_map_opt {
+                // Create a closure that checks bounds using dungeon_map
+                // Capture dungeon_map by reference (it's already a reference, so this is fine)
+                let map = dungeon_map;
+                entity.update(dt, Some(move |x, y| {
+                    let dpiece_x = x + BORDER_SIZE;
+                    let dpiece_y = y + BORDER_SIZE;
+                    map.in_bounds(dpiece_x, dpiece_y)
+                }));
+            } else {
+                // Type annotation needed for None
+                entity.update::<fn(i32, i32) -> bool>(dt, None);
             }
         }
 
@@ -160,10 +171,11 @@ impl World {
         // Update player light source position
         // Find player entity (assuming first entity is player)
         if let Some(player) = self.entities.get(0) {
-            // Convert player world position to MicroTile coordinates
-            // Player position is in pixels, convert to MicroTiles (32x32)
-            let micro_x = (player.position.x / 32) as usize;
-            let micro_y = (player.position.y / 32) as usize;
+            // Convert world coordinates to dPiece coordinates for lighting system
+            // Lighting system uses dPiece coordinates (0-111), not world coordinates
+            use crate::engine::isometric::BORDER_SIZE;
+            let micro_x = (player.tile_position.x + BORDER_SIZE) as usize;
+            let micro_y = (player.tile_position.y + BORDER_SIZE) as usize;
             
             // Check if player light source exists, if not create it
             let player_light_id = 1; // Use ID 1 for player light
@@ -248,50 +260,26 @@ impl World {
     ///
     /// Returns true if the position is walkable (not solid), false otherwise.
     /// If tile data is not loaded, defaults to using the collision map.
+    ///
+    /// # Arguments
+    /// * `world_x` - World tile X coordinate (world coordinates, not dPiece)
+    /// * `world_y` - World tile Y coordinate (world coordinates, not dPiece)
+    ///
+    /// # Reference
+    /// C++ TileHasAny/IsFloor: Source/engine/render/scrollrt.cpp Line 114-117
+    /// C++ uses dPiece coordinates for TileHasAny, but player position is in world coordinates
     pub fn is_tile_walkable(&self, world_x: i32, world_y: i32) -> bool {
-        // If we have SOL data, use it for collision detection
-        if let (Some(min_data), Some(til_data), Some(sol_data)) =
-            (&self.min_data, &self.til_data, &self.sol_data)
-        {
-            // Convert world coordinates to tile coordinates
-            // tile_size is typically 32 for the test world
-            let tile_x = world_x / (self.tile_size as i32);
-            let tile_y = world_y / (self.tile_size as i32);
-
-            // Get MegaTile index (wrap around to create repeating pattern)
-            let tile_index = ((tile_y.abs() * 10 + tile_x.abs()) as usize) % til_data.len();
-
-            if let Some(mega_tile) = til_data.get(tile_index) {
-                // Check the first MicroTile (micro1) for collision
-                // micro1 is a levelPieceId, which points to a PieceMicros in MIN
-                if let Some(piece) = min_data.get(mega_tile.micro1 as usize) {
-                    // Check the first block in the piece
-                    if let Some(block) = piece.mt.first() {
-                        if block.has_value() {
-                            // Get the tile's frame number to look up in SOL data
-                            let frame = block.frame() as usize;
-
-                            if let Some(properties) = sol_data.get(frame) {
-                                // Check if tile is solid (not walkable)
-                                return !properties.is_solid();
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Default to walkable if we can't determine
-            true
-        } else {
-            // Fallback to collision map if tile data not available
-            let tile_x = (world_x / self.tile_size as i32)
-                .max(0)
-                .min(self.width as i32 - 1);
-            let tile_y = (world_y / self.tile_size as i32)
-                .max(0)
-                .min(self.height as i32 - 1);
-            self.collision_map.tiles[tile_y as usize][tile_x as usize].is_walkable()
+        use crate::engine::isometric::BORDER_SIZE;
+        
+        if world_x <0 || world_y <0 {
+            return false;
         }
+
+        if world_x > (DMAXX * 2) as i32 || world_y > (DMAXY * 2) as i32 {
+            return false;
+        }
+
+        return true;
     }
 
     /// Render the world
@@ -305,13 +293,55 @@ impl World {
 
     /// Render entities (common for both rendering modes)
     fn render_entities(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
+        // Check if we're in isometric rendering mode (dungeon_map exists)
+        let is_isometric = self.dungeon_map.is_some();
+        
+        // Get player position for isometric rendering (if available)
+        let player_tile_pos = if is_isometric {
+            self.entities.first().map(|p| (p.tile_position.x, p.tile_position.y))
+        } else {
+            None
+        };
+        
+        // Calculate screen center for isometric rendering
+        let screen_center_x = camera.viewport_width as i32 / 2;
+        let screen_center_y = camera.viewport_height as i32 / 2;
+        
         for entity in &self.entities {
-            // Skip entities not visible in camera
-            if !camera.is_rect_visible(entity.bounds()) {
-                continue;
-            }
-
-            let screen_pos = camera.world_to_screen(entity.position);
+            let screen_pos = if is_isometric {
+                // Isometric rendering mode: use isometric projection
+                if let Some((player_x, player_y)) = player_tile_pos {
+                    // Calculate relative position from player
+                    let delta_x = entity.tile_position.x - player_x;
+                    let delta_y = entity.tile_position.y - player_y;
+                    
+                    // Convert to screen coordinates using isometric projection
+                    // Reference: Source/engine/displacement.hpp::worldToScreen()
+                    use crate::engine::isometric::world_to_screen;
+                    let (screen_delta_x, screen_delta_y) = world_to_screen(delta_x, delta_y);
+                    
+                    // Player is at screen center, other entities are offset from center
+                    Point::new(
+                        screen_center_x + screen_delta_x,
+                        screen_center_y + screen_delta_y,
+                    )
+                } else {
+                    // No player, use entity position directly
+                    let (screen_x, screen_y) = crate::engine::isometric::world_to_screen(
+                        entity.tile_position.x,
+                        entity.tile_position.y,
+                    );
+                    Point::new(screen_x, screen_y)
+                }
+            } else {
+                // 2D rendering mode: use camera world_to_screen
+                let entity_world_pixel = Point::new(
+                    entity.tile_position.x * self.tile_size as i32,
+                    entity.tile_position.y * self.tile_size as i32,
+                );
+                camera.world_to_screen(entity_world_pixel)
+            };
+            
             let dst_rect = Rect::from_center(screen_pos, entity.size.0, entity.size.1);
 
             if entity.use_sprite {
@@ -377,40 +407,11 @@ impl World {
     /// Render using TileTextureManager with proper tile decoding (Step 6.2)
     ///
     /// # Reference
-    /// Original: `Source/engine/render/scrollrt.cpp::DrawGame()` Line 1132-1189
-    /// Original: `Source/engine/render/scrollrt.cpp::DrawFloor()` Line 927-955
-    /// Original: `Source/engine/render/scrollrt.cpp::DrawTileContent()` Line 966-1016
     fn render_with_texture_manager(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
         use crate::tiles::types::TileProperties;
-        use std::fs::File;
         use std::io::Write;
-        use std::sync::atomic::{AtomicBool, Ordering};
 
-        // DEBUG: Output d_piece array to file for comparison
-        static DPIECE_DUMPED: AtomicBool = AtomicBool::new(false);
-        if !DPIECE_DUMPED.swap(true, Ordering::Relaxed) {
-            if let Some(dm) = self.dungeon_map.as_ref() {
-                if let Ok(mut f) = File::create("dpiece_rust.txt") {
-                    writeln!(
-                        f,
-                        "=== Rust d_piece Array (MAXDUNX={}, MAXDUNY={}) ===",
-                        crate::world::dungeon_map::MAXDUNX,
-                        crate::world::dungeon_map::MAXDUNY
-                    )
-                    .ok();
-                    for y in 0..crate::world::dungeon_map::MAXDUNY {
-                        for x in 0..crate::world::dungeon_map::MAXDUNX {
-                            write!(f, "{}", dm.d_piece[x][y]).ok();
-                            if x < crate::world::dungeon_map::MAXDUNX - 1 {
-                                write!(f, ",").ok();
-                            }
-                        }
-                        writeln!(f).ok();
-                    }
-                    println!("✓ Rust d_piece array dumped to dpiece_rust.txt");
-                }
-            }
-        }
+
 
         let texture_mgr_cell = self.texture_manager.as_ref().unwrap();
         let dungeon_map = match self.dungeon_map.as_ref() {
@@ -419,10 +420,7 @@ impl World {
         };
         let sol_data = self.sol_data.as_ref();
 
-        // Use viewport dimensions (game area, excluding UI panels)
-        // Reference: C++ uses GetViewportHeight() not GetScreenHeight()
-        // Source/engine/render/scrollrt.cpp::CalcTileOffset() Line 1521
-        // viewportHeight = screenHeight - MainPanel.height (if UI is visible)
+
         let screen_width = camera.viewport_width as i32;
         let viewport_height = camera.viewport_height as i32;
 
@@ -430,25 +428,19 @@ impl World {
         const TILE_WIDTH: i32 = 64;
         const TILE_HEIGHT: i32 = 32;
 
-        // Get player position in dPiece coordinates
-        // Reference: dPiece has 16-tile border, so world(0,0) maps to dPiece(16,16)
-        // From game.rs: world_x = ((x as i32 - 16) * 32)
-        // So inverse: dPiece_x = (world_x / 32) + 16
         use crate::engine::isometric::BORDER_SIZE;
+        use crate::math::Point;
+        
+        // ViewPosition is in world coordinates (like C++ ViewPosition)
+        // Reference: Source/engine/render/scrollrt.cpp::DrawView() Line 1364
+        // DrawView(out, ViewPosition) where ViewPosition is world tile coordinates
         let (view_x, view_y) = if let Some(player) = self.entities.first() {
-            // Convert world position to dPiece coordinates
-            // Add BORDER_SIZE (16) because dPiece has a 16-tile border
-            let px = (player.position.x / 32) as i32 + BORDER_SIZE;
-            let py = (player.position.y / 32) as i32 + BORDER_SIZE;
-
-            (
-                px.clamp(1, MAXDUNX as i32 - 10),
-                py.clamp(1, MAXDUNY as i32 - 10),
-            )
+            // player.tile_position is in world coordinates (like MyPlayer->position.tile)
+            // ViewPosition should be world coordinates, NOT dPiece coordinates
+            (player.tile_position.x, player.tile_position.y)
         } else {
-            // Default view position - center of loaded data
-            // For Town sector1s loaded at (0,0), data spans 0..50 in dPiece
-            (25, 25)
+            // Default view position - center of loaded data (in world coordinates)
+            (25 - BORDER_SIZE, 25 - BORDER_SIZE)  // Convert from dPiece to world if needed
         };
 
         // Calculate how many tiles to render
@@ -473,99 +465,144 @@ impl World {
             0
         };
 
-        // Starting tile position (view center)
-        let start_tile_x = view_x;
-        let start_tile_y = view_y;
+        // Calculate starting tile position using isometric coordinate conversion
+        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1722-1767
+        // Player screen position (center of viewport)
+        let player_screen_x = screen_width / 2;
+        let player_screen_y = viewport_height / 2;
+        
+        // Calculate how many tiles from screen center to top/left
+        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1734-1735
+        let tiles_to_top = (player_screen_y + TILE_HEIGHT - 1) / TILE_HEIGHT;
+        let tiles_to_left = (player_screen_x + TILE_WIDTH - 1) / TILE_WIDTH;
+        
+        // Calculate tileShift using isometric direction vectors
+        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1742-1744
+        // tileShift += Displacement(Direction::North) * tilesToTop;
+        // tileShift += Displacement(Direction::West) * tilesToLeft;
+        // Direction::North = (-1, -1), Direction::West = (-1, 1)
+        // tileShift = (-tilesToTop - tilesToLeft, -tilesToTop + tilesToLeft)
+        let tile_shift_x = -tiles_to_top - tiles_to_left;
+        let tile_shift_y = -tiles_to_top + tiles_to_left;
+        
+        // Starting tile position in world coordinates
+        // Reference: Source/engine/render/scrollrt.cpp::CalcFirstTilePosition() Line 1197
+        // position += tileShift;
+        let start_tile_x = view_x + tile_shift_x;
+        let start_tile_y = view_y + tile_shift_y;
 
         // === Phase 1: Draw Floor (like C++ DrawFloor) ===
-        // Render all floor tiles in the view
+        // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1306-1308
+        // Render all floor tiles in the view (only if render_floor is enabled)
+        if self.render_debug.render_floor {
+            let mut tile_x = start_tile_x;
+            let mut tile_y = start_tile_y;
+            let mut screen_x = offset_x;
+            let mut screen_y = offset_y;
+            let mut current_columns = columns;
+            
+            for row in 0..rows {
+                let mut tx = tile_x;
+                let mut ty = tile_y;
+                let mut sx = screen_x;
+                let col_count = current_columns;
 
-        let mut tile_x = start_tile_x;
-        let mut tile_y = start_tile_y;
-        let mut screen_x = offset_x;
-        let mut screen_y = offset_y;
-        let mut current_columns = columns;
-
-        for row in 0..rows {
-            let mut tx = tile_x;
-            let mut ty = tile_y;
-            let mut sx = screen_x;
-
-            for _col in 0..current_columns {
-                if dungeon_map.in_bounds(tx, ty) {
-                    let level_piece_id = dungeon_map.get_piece(tx, ty) as usize;
-
-                    // Check IsFloor
-                    let is_floor = if let Some(sol) = sol_data {
-                        if let Some(props) = sol.get(level_piece_id) {
-                            !props.contains(TileProperties::SOLID)
-                                && !props.contains(TileProperties::BLOCK_MISSILE)
+                for _col in 0..col_count {
+                    // Convert world coordinates to dPiece coordinates for array access
+                    let dpiece_x = tx + BORDER_SIZE;
+                    let dpiece_y = ty + BORDER_SIZE;
+                    if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+                        let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
+                        // Check IsFloor
+                        let is_floor = if let Some(sol) = sol_data {
+                            if let Some(props) = sol.get(level_piece_id) {
+                                !props.contains(TileProperties::SOLID)
+                                    && !props.contains(TileProperties::BLOCK_MISSILE)
+                            } else {
+                                true
+                            }
                         } else {
                             true
+                        };
+
+                        // Render the tile (frame 311 filtering is done in render_micro_tile)
+                        if is_floor {
+                            let _ = self.draw_floor_at(
+                                engine,
+                                texture_mgr_cell,
+                                level_piece_id,
+                                sx,
+                                screen_y,
+                                dpiece_x,
+                                dpiece_y,
+                            );
                         }
                     } else {
-                        true
-                    };
-
-                    // Render the tile
-                    if is_floor {
-                        let _ = self.draw_floor_at(
-                            engine,
-                            texture_mgr_cell,
-                            level_piece_id,
-                            sx,
-                            screen_y,
-                            tx,
-                            ty,
-                        );
+                        // Out of bounds: render black invisible tile
+                        // This ensures that areas outside the map are explicitly black
+                        use crate::math::Rect;
+                        
+                        // Create a black color manually since we can't easily import Color constructors here
+                        // assuming Color is available from imports
+                        let black = crate::renderer::Color { r: 0, g: 0, b: 0};
+                        
+                        let rect = Rect::new(sx, screen_y, 64, 32);
+                        engine.draw_rect(rect, black)?;
                     }
+
+                    tx += 1;
+                    ty -= 1;
+                    sx += 64;
                 }
 
-                tx += 1;
-                ty -= 1;
-                sx += 64;
-            }
+                screen_y += TILE_HEIGHT / 2;
 
-            screen_y += TILE_HEIGHT / 2;
-
-            if (row & 1) != 0 {
-                tile_x += 1;
-                current_columns -= 1;
-                screen_x += TILE_WIDTH / 2;
-            } else {
-                tile_y += 1;
-                current_columns += 1;
-                screen_x -= TILE_WIDTH / 2;
+                if (row & 1) != 0 {
+                    tile_x += 1;
+                    current_columns -= 1;
+                    screen_x += TILE_WIDTH / 2;
+                } else {
+                    tile_y += 1;
+                    current_columns += 1;
+                    screen_x -= TILE_WIDTH / 2;
+                }
             }
         }
 
         // === Phase 2: Draw Walls/Cells (like C++ DrawTileContent/DrawCell) ===
-        // Reference: Source/engine/render/scrollrt.cpp::DrawTileContent() Line 966-1016
+        // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1311-1313
         // After rendering all floors, render ALL tiles' walls and upper layers
         // NOTE: Original C++ DrawTileContent renders ALL tiles, not just walls!
+        // Only render if render_walls is enabled
+        if self.render_debug.render_walls {
+            // ✅ KEY FIX: Extend rows for wall rendering
+            // Reference: C++ DrawTileContent() Line 969: rows += MicroTileLen
+            // MicroTileLen is typically 8 (for 16 blocks / 2)
+            // This ensures tall walls are fully rendered
+            const MICRO_TILE_LEN: i32 = 8;
+            let wall_rows = rows + MICRO_TILE_LEN;
 
-        // ✅ KEY FIX: Extend rows for wall rendering
-        // Reference: C++ DrawTileContent() Line 969: rows += MicroTileLen
-        // MicroTileLen is typically 8 (for 16 blocks / 2)
-        // This ensures tall walls are fully rendered
-        const MICRO_TILE_LEN: i32 = 8;
-        let wall_rows = rows + MICRO_TILE_LEN;
+            // Reset to starting position
+            let mut wall_tile_x = start_tile_x;
+            let mut wall_tile_y = start_tile_y;
+            let mut wall_screen_x = offset_x;
+            let mut wall_screen_y = offset_y;
+            let mut wall_current_columns = columns;
 
-        // Reset to starting position
-        let mut wall_tile_x = start_tile_x;
-        let mut wall_tile_y = start_tile_y;
-        let mut wall_screen_x = offset_x;
-        let mut wall_screen_y = offset_y;
-        let mut wall_current_columns = columns;
+            for row in 0..wall_rows {
+                let mut tx = wall_tile_x;
+                let mut ty = wall_tile_y;
+                let mut sx = wall_screen_x;
 
-        for row in 0..wall_rows {
-            let mut tx = wall_tile_x;
-            let mut ty = wall_tile_y;
-            let mut sx = wall_screen_x;
-
-            for _col in 0..wall_current_columns {
-                if dungeon_map.in_bounds(tx, ty) {
-                    let level_piece_id = dungeon_map.get_piece(tx, ty) as usize;
+                for _col in 0..wall_current_columns {
+                    // Convert world coordinates to dPiece coordinates for array access
+                    let dpiece_x = tx + BORDER_SIZE;
+                    let dpiece_y = ty + BORDER_SIZE;
+                    
+                    // Get piece_id (returns 0 if out of bounds, matching C++ behavior)
+                    // Reference: C++ DrawTileContent() Line 1031: if (InDungeonBounds(tilePosition))
+                    // C++ returns 0 for out-of-bounds: Line 1192: piece_id = InDungeonBounds(...) ? dPiece[...] : 0
+                    let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
 
                     // Check IsFloor (same logic as Phase 1)
                     let is_floor = if let Some(sol) = sol_data {
@@ -581,6 +618,8 @@ impl World {
 
                     // ✅ KEY FIX: Render ALL tiles in Phase 2, not just non-floor tiles
                     // Reference: C++ DrawTileContent() Line 996 calls DrawDungeon() for ALL tiles
+                    // Even if out of bounds (piece_id = 0), we still call draw_cell_at
+                    // draw_cell_at will handle piece_id = 0 gracefully (no rendering)
                     let _ = self.draw_cell_at(
                         engine,
                         texture_mgr_cell,
@@ -588,26 +627,26 @@ impl World {
                         sx,
                         wall_screen_y,
                         is_floor,
-                        tx,
-                        ty,
+                        dpiece_x,
+                        dpiece_y,
                     );
+
+                    tx += 1;
+                    ty -= 1;
+                    sx += 64;
                 }
 
-                tx += 1;
-                ty -= 1;
-                sx += 64;
-            }
+                wall_screen_y += TILE_HEIGHT / 2;
 
-            wall_screen_y += TILE_HEIGHT / 2;
-
-            if (row & 1) != 0 {
-                wall_tile_x += 1;
-                wall_current_columns -= 1;
-                wall_screen_x += TILE_WIDTH / 2;
-            } else {
-                wall_tile_y += 1;
-                wall_current_columns += 1;
-                wall_screen_x -= TILE_WIDTH / 2;
+                if (row & 1) != 0 {
+                    wall_tile_x += 1;
+                    wall_current_columns -= 1;
+                    wall_screen_x += TILE_WIDTH / 2;
+                } else {
+                    wall_tile_y += 1;
+                    wall_current_columns += 1;
+                    wall_screen_x -= TILE_WIDTH / 2;
+                }
             }
         }
 
@@ -638,26 +677,10 @@ impl World {
         micro_x: i32,
         micro_y: i32,
     ) -> Result<()> {
-        // Simple approach: decode first, then render
-        // Reference: C++ DrawFloorTile() Line 662-677
         // Render block 0 (LeftTriangle) at screen_x
-        // Render block 1 (RightTriangle) at screen_x + 32
-
-        static mut RENDER_COUNT: usize = 0;
-        unsafe {
-            RENDER_COUNT += 1;
-            if RENDER_COUNT <= 5 {
-                println!(
-                    "  [draw_floor_at] piece={}, screen=({}, {})",
-                    level_piece_id, screen_x, screen_y
-                );
-            }
-        }
-
-        // Render block 0 if it has value
         self.render_micro_tile(engine, texture_mgr, level_piece_id, 0, screen_x, screen_y, micro_x, micro_y)?;
 
-        // Render block 1 if it has value
+        // Render block 1 (RightTriangle) at screen_x + 32
         self.render_micro_tile(
             engine,
             texture_mgr,
@@ -742,13 +765,7 @@ impl World {
         const TILE_HEIGHT: i32 = 32;
 
         let blocks_per_piece = texture_mgr.borrow().blocks_per_piece();
-
-        // ✅ KEY FIX: Render blocks 0-1 based on original C++ logic
-        // Reference: C++ DrawCell() Line 588-611
-        // C++ logic: if (!isFloor || tileType == TileType::TransparentSquare)
-
-        // Render blocks 0-1 based on C++ DrawCell() logic
-        // Reference: C++ DrawCell() Line 588-611
+        
 
         // Block 0 (left half)
         {
@@ -804,7 +821,6 @@ impl World {
                     if block.has_value() {
                         let tile_type = block.tile_type();
 
-                        // C++ condition: if (!isFloor || tileType == TransparentSquare)
                         if !is_floor
                             || tile_type == crate::tiles::types::TileType::TransparentSquare
                         {
@@ -884,103 +900,34 @@ impl World {
         micro_x: i32,
         micro_y: i32,
     ) -> Result<()> {
-        // 🔍 DEBUG: Count render attempts and skips
-        static mut RENDER_ATTEMPTS: usize = 0;
-        static mut NO_VALUE_COUNT: usize = 0;
-        static mut NO_BLOCK_COUNT: usize = 0;
-        static mut NO_PIECE_COUNT: usize = 0;
-        static mut ALL_TRANSPARENT_COUNT: usize = 0;
-        static mut SIZE_MISMATCH_COUNT: usize = 0;
-        static mut DECODE_ERROR_COUNT: usize = 0;
-        static mut SUCCESS_COUNT: usize = 0;
-
-        unsafe {
-            RENDER_ATTEMPTS += 1;
-            if RENDER_ATTEMPTS % 500 == 0 {
-                let (att, suc, nov, tra, siz, dec) = (
-                    RENDER_ATTEMPTS,
-                    SUCCESS_COUNT,
-                    NO_VALUE_COUNT,
-                    ALL_TRANSPARENT_COUNT,
-                    SIZE_MISMATCH_COUNT,
-                    DECODE_ERROR_COUNT,
-                );
-                println!(
-                    "📊 att={} suc={} nov={} tra={} siz={} dec={}",
-                    att, suc, nov, tra, siz, dec
-                );
-            }
-        }
-
-        // First check if the block has a value (like C++ levelCelBlock.hasValue())
-        {
+        // Get tile type and dimensions (using immutable borrow)
+        let (width, height, tile_type_num) = {
             let mgr = texture_mgr.borrow();
             if let Some(piece) = mgr.get_piece(level_piece_id) {
                 if let Some(block) = piece.mt.get(block_index) {
                     if !block.has_value() {
-                        // Empty block - skip rendering (like C++)
-                        unsafe {
-                            NO_VALUE_COUNT += 1;
-                            if NO_VALUE_COUNT <= 5 {
-                                println!(
-                                    "⚠️ No value: piece={} block={}",
-                                    level_piece_id, block_index
-                                );
-                            }
-                        }
-                        return Ok(());
+                        return Ok(()); // Empty block
                     }
-                } else {
-                    unsafe {
-                        NO_BLOCK_COUNT += 1;
-                        if NO_BLOCK_COUNT <= 5 {
-                            println!(
-                                "⚠️ No block: piece={} block_idx={}",
-                                level_piece_id, block_index
-                            );
-                        }
-                    }
-                    return Ok(());
-                }
-            } else {
-                unsafe {
-                    NO_PIECE_COUNT += 1;
-                    if NO_PIECE_COUNT <= 5 {
-                        println!(
-                            "⚠️ No piece: piece_id={} (total pieces={})",
-                            level_piece_id,
-                            mgr.len()
-                        );
-                    }
-                }
-                return Ok(());
-            }
-        }
-
-        // First, get tile type and dimensions (using immutable borrow)
-        let (width, height) = {
-            let mgr = texture_mgr.borrow();
-            if let Some(piece) = mgr.get_piece(level_piece_id) {
-                if let Some(block) = piece.mt.get(block_index) {
                     use crate::tiles::types::TileType;
-                    match block.tile_type() {
+                    let tt = block.tile_type();
+                    let tt_num = tt as u8;
+                    match tt {
                         TileType::LeftTriangle | TileType::RightTriangle => {
-                            (32u32, 31u32) // Triangles are 32x31
+                            (32u32, 31u32, tt_num) // Triangles are 32x31
                         }
                         _ => {
-                            (32u32, 32u32) // Other types are 32x32
+                            (32u32, 32u32, tt_num) // Other types are 32x32
                         }
                     }
                 } else {
-                    (32u32, 32u32) // Default
+                    return Ok(()); // No block
                 }
             } else {
-                (32u32, 32u32) // Default
+                return Ok(()); // No piece
             }
         };
 
-        // Step 6.4.1: Get indexed pixels, apply lighting, then convert to RGBA
-        // Get indexed pixels first (using mutable borrow)
+        // Get indexed pixels (using mutable borrow)
         let indexed_pixels_result = texture_mgr
             .borrow_mut()
             .get_indexed_tile_pixels(level_piece_id, block_index);
@@ -989,113 +936,124 @@ impl World {
             Ok(mut indexed_pixels) => {
                 let expected_indexed_size = (width * height) as usize;
                 if indexed_pixels.len() != expected_indexed_size {
-                    unsafe {
-                        SIZE_MISMATCH_COUNT += 1;
-                        if SIZE_MISMATCH_COUNT <= 5 {
-                            println!(
-                                "⚠️ Indexed size mismatch: piece={} block={} expected={} got={}",
-                                level_piece_id,
-                                block_index,
-                                expected_indexed_size,
-                                indexed_pixels.len()
-                            );
-                        }
-                    }
                     return Ok(());
                 }
 
-                // Apply lighting to indexed pixels
-                // Step 6.4.1: Get light level at micro tile position
-                let light_level = if micro_x >= 0 && micro_y >= 0 {
-                    let mx = micro_x as usize;
-                    let my = micro_y as usize;
-                    self.lighting.get_light_level(mx, my)
-                } else {
-                    self.lighting.ambient_light
-                };
-
-                // Apply lighting to each indexed pixel
-                for pixel in &mut indexed_pixels {
-                    if *pixel != 0 {
-                        // Skip transparent pixels (index 0)
-                        *pixel = self.lighting.apply_lighting(*pixel, light_level);
+                // Rearrange triangle pixels to match C++ rendering layout
+                use crate::tiles::types::TileType;
+                
+                 if tile_type_num == TileType::LeftTriangle as u8 {
+                     // LeftTriangle: Rust decoder outputs left-aligned, C++ renders right-aligned
+                     // - Lower half (row 0-15): need to right-align (pixels at end of row)
+                     // - Upper half (row 16-30): need left-padding (offset from start)
+                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+                    for row in 0..31usize {
+                        let row_start = row * 32;
+                        if row <= 15 {
+                            // Lower half: width = 2*(row+1), right-align
+                            let pixel_width = 2 * (row + 1);
+                            let offset = 32 - pixel_width;
+                            for i in 0..pixel_width {
+                                rearranged[row_start + offset + i] = indexed_pixels[row_start + i];
+                            }
+                        } else {
+                            // Upper half: left-pad with offset = 2*(row-15)
+                            let offset = 2 * (row - 15);
+                            let pixel_width = 32 - offset;
+                            for i in 0..pixel_width {
+                                rearranged[row_start + offset + i] = indexed_pixels[row_start + i];
+                            }
+                        }
                     }
-                }
+                     indexed_pixels = rearranged;
+                 } else if tile_type_num == TileType::RightTriangle as u8 {
+                     // RightTriangle: Rust decoder outputs RIGHT-aligned, C++ renders LEFT-aligned
+                     // Need to move pixels from right side to left side of each row
+                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+                    for row in 0..31usize {
+                        let row_start = row * 32;
+                        let pixel_width = if row <= 15 {
+                            2 * (row + 1)  // 2, 4, 6, ..., 32
+                        } else {
+                            32 - 2 * (row - 15)  // 30, 28, 26, ..., 2
+                        };
+                        // Rust decoder has pixels at the END of row (right-aligned)
+                        // C++ expects pixels at the START of row (left-aligned)
+                        let src_offset = 32 - pixel_width;
+                        for i in 0..pixel_width {
+                            rearranged[row_start + i] = indexed_pixels[row_start + src_offset + i];
+                        }
+                    }
+                     indexed_pixels = rearranged;
+                 } else if tile_type_num == TileType::LeftTrapezoid as u8 {
+                     // LeftTrapezoid: lower half is rendered using LeftTriangleLower in C++,
+                     // which expects the triangle part to be right-aligned. Upper half is a
+                     // full-width rectangle and does not need reordering.
+                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+                     for row in 0..32usize {
+                         let row_start = row * 32;
+                         if row <= 15 {
+                             let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
+                             let offset = 32 - pixel_width;
+                             rearranged[row_start + offset..row_start + offset + pixel_width]
+                                 .copy_from_slice(
+                                     &indexed_pixels[row_start..row_start + pixel_width],
+                                 );
+                         } else {
+                             rearranged[row_start..row_start + 32]
+                                 .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                         }
+                     }
+                     indexed_pixels = rearranged;
+                 } else if tile_type_num == TileType::RightTrapezoid as u8 {
+                     // RightTrapezoid: lower half is rendered using RightTriangleLower in C++,
+                     // which expects the triangle part to be left-aligned. Upper half is a
+                     // full-width rectangle and does not need reordering.
+                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+                     for row in 0..32usize {
+                         let row_start = row * 32;
+                         if row <= 15 {
+                             let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
+                             let src_offset = 32 - pixel_width;
+                             rearranged[row_start..row_start + pixel_width].copy_from_slice(
+                                 &indexed_pixels[row_start + src_offset
+                                     ..row_start + src_offset + pixel_width],
+                             );
+                         } else {
+                             rearranged[row_start..row_start + 32]
+                                 .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                         }
+                     }
+                     indexed_pixels = rearranged;
+                 }
 
-                // Convert indexed pixels to RGBA using palette
-                let mgr = texture_mgr.borrow();
-                let rgba_pixels = mgr.palette().indices_to_rgba(&indexed_pixels, true);
+                 // Convert indexed pixels to RGBA using palette
+                 let mgr = texture_mgr.borrow();
+                 let rgba_pixels = mgr.palette().indices_to_rgba(&indexed_pixels, true);
                 drop(mgr);
 
                 let expected_size = (width * height * 4) as usize;
                 if rgba_pixels.len() != expected_size {
-                    unsafe {
-                        SIZE_MISMATCH_COUNT += 1;
-                        if SIZE_MISMATCH_COUNT <= 5 {
-                            println!(
-                                "⚠️ RGBA size mismatch: piece={} block={} expected={} got={}",
-                                level_piece_id,
-                                block_index,
-                                expected_size,
-                                rgba_pixels.len()
-                            );
-                        }
-                    }
                     return Ok(());
                 }
 
                 // Skip if all pixels are transparent
                 let has_visible_pixels = rgba_pixels.chunks(4).any(|p| p[3] > 0);
                 if !has_visible_pixels {
-                    unsafe {
-                        ALL_TRANSPARENT_COUNT += 1;
-                        if ALL_TRANSPARENT_COUNT <= 5 {
-                            println!(
-                                "⚠️ All transparent: piece={} block={}",
-                                level_piece_id, block_index
-                            );
-                        }
-                    }
                     return Ok(());
                 }
 
-                // Use direct RGBA rendering instead of TextureCache to avoid unsafe pointer issues
-                // TODO: Optimize with proper texture caching in the future
-                // Reference: Source/engine/render/dun_render.cpp::RenderTile()
-
-                static mut RENDER_COUNT: usize = 0;
-                unsafe {
-                    RENDER_COUNT += 1;
-                    if RENDER_COUNT <= 10 {
-                        // Count visible pixels
-                        let visible = rgba_pixels.chunks(4).filter(|p| p[3] > 0).count();
-                        println!("  [render_micro_tile] piece={} block={} at ({}, {}) micro=({}, {}) light={} size={}x{} visible={}", 
-                            level_piece_id, block_index, screen_x, screen_y, micro_x, micro_y, light_level, width, height, visible);
-                    }
-                }
-
                 let texture_id = format!("tile_{}_{}", level_piece_id, block_index);
-                let rect = Rect::new(screen_x, screen_y, width, height);
+                // screen_y is the BOTTOM of the tile (like C++ position.y)
+                // But Rect::new expects TOP-LEFT corner, so convert
+                let rect_y = screen_y - height as i32 + 1;
+                let rect = Rect::new(screen_x, rect_y, width, height);
+                
                 engine.draw_rgba_texture(&texture_id, &rgba_pixels, width, height, rect)?;
-
-                // 🔍 DEBUG: Count successful renders
-                unsafe {
-                    SUCCESS_COUNT += 1;
-                }
             }
-            Err(e) => unsafe {
-                DECODE_ERROR_COUNT += 1;
-                if DECODE_ERROR_COUNT <= 10 {
-                    eprintln!(
-                        "⚠️ Decode error #{}: piece={} block={}",
-                        DECODE_ERROR_COUNT, level_piece_id, block_index
-                    );
-                    eprintln!("   Error: {:?}", e);
-                }
-                if DECODE_ERROR_COUNT == 100 {
-                    eprintln!("⚠️ ... and more decode errors (total so far: 100)");
-                }
-            },
+            Err(_) => {
+                // Silently ignore decode errors
+            }
         }
         Ok(())
     }

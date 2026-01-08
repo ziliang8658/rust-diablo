@@ -285,9 +285,7 @@ impl Engine {
         // This prevents transparent edge pixels from blending and creating visible seams
         sdl_texture.set_blend_mode(sdl2::render::BlendMode::Blend);
 
-        // Draw dungeon tiles with vertical flip only
-        // CLX special CEL files (trees, etc.) store pixels bottom-to-top, need flip_v
-        // Reference: CLX format is bottom-to-top, SDL Y-axis is top-to-bottom
+        // Draw dungeon tiles - no flip needed, data is already in correct orientation
         self.canvas
             .copy_ex(
                 &sdl_texture,
@@ -295,8 +293,8 @@ impl Engine {
                 sdl_rect,
                 0.0,
                 None,
-                false, // flip_h - no horizontal flip
-                true,  // flip_v - vertical flip for CLX bottom-to-top format
+                false, // flip_h
+                true, // flip_v
             )
             .map_err(|e| anyhow::anyhow!("Failed to copy texture: {}", e))?;
 
@@ -546,8 +544,7 @@ impl Engine {
     pub fn clear(&mut self) -> Result<()> {
         // 🔧 FIX: Use dark gray instead of pure black to make tile seams less visible
         // Pure black background makes transparent pixels in triangles show as black gaps
-        // TODO: Replace with proper lighting system in Step 6.4
-        self.clear_with_color(Color::new(16, 16, 16))
+        self.clear_with_color(Color::new(0, 0, 0))
     }
 
     /// Clear the rendering surface with a specific color

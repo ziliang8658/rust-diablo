@@ -18,6 +18,19 @@
   - 完整的Rust实现代码
   - 测试策略和工具
 
+- **triangle-pixel-layout-debugging.md** - 三角形像素布局调试经验
+  - LeftTriangle/RightTriangle 像素布局差异分析
+  - 调试过程和方法论
+  - 像素重排算法实现
+  - 踩坑点和学习要点
+  - 性能优化方向
+
+- **graphics-debugging-techniques.md** - 图形学与游戏调试技巧大全
+  - 15种调试技巧详解（数值化、可视化、分层渲染等）
+  - 实用工具和代码示例
+  - 调试工作流和最佳实践
+  - 在 Rust Diablo 项目中的应用案例
+
 ## 📖 文档说明
 
 ### 为什么需要单独的技术要点文档？
@@ -63,6 +76,8 @@
 |----------|-----------|---------|
 | Step 4.2 | [sprite-sheet-system.md](sprite-sheet-system.md) | 精灵表系统完整实现 |
 | Step 5 | [step5-resource-formats.md](step5-resource-formats.md) | 原版资源格式完整实现 |
+| Step 6.4 | [triangle-pixel-layout-debugging.md](triangle-pixel-layout-debugging.md) | 三角形像素布局调试经验 |
+| 通用 | [graphics-debugging-techniques.md](graphics-debugging-techniques.md) | 图形学与游戏调试技巧大全 |
 | Step 6+ | 待补充 | 后续步骤的技术要点将陆续添加 |
 
 ## 📝 文档更新规则
