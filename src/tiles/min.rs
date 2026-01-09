@@ -118,7 +118,7 @@ impl MinData {
         mpq_manager: &mut crate::resources::MpqManager,
         dungeon_type: DungeonType,
     ) -> Result<Self> {
-        let candidates: &[&str] = match dungeon_type {
+        let candidates: &[&'static str] = match dungeon_type {
             DungeonType::Town => &[
                 // Match DevilutionX C++ preference order (Source/levels/gendung.cpp loads nlevels first)
                 "nlevels/towndata/town.min",
@@ -130,17 +130,11 @@ impl MinData {
             DungeonType::Hell => &["levels/l4data/l4.min"],
         };
 
-        let mut last_err: Option<anyhow::Error> = None;
-        for path in candidates {
-            match Self::from_mpq(mpq_manager, path, dungeon_type) {
-                Ok(result) => {
-                    println!("Loaded MIN: {}", path);
-                    return Ok(result);
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to load MIN file")))
+        crate::tiles::load_first_candidate(
+            candidates,
+            |path| Self::from_mpq(mpq_manager, path, dungeon_type),
+            "MIN",
+        )
     }
 }
 

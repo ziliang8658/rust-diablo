@@ -15,8 +15,14 @@ pub struct RenderDebugFlags {
     pub render_walls: bool,
     /// Enable entity rendering
     pub render_entities: bool,
-    /// Show debug info overlay
-    pub show_debug_info: bool,
+    /// Show debug overlay
+    pub show_debug_overlay: bool,
+    /// Render only the 2x2 region around the view center (in dPiece coordinates)
+    pub focus_render_2x2: bool,
+    /// Log the focused render region/tile IDs (requires `focus_render_2x2`)
+    pub log_render_focus: bool,
+    /// Enable toon/comic post-processing on tiles
+    pub toon_filter: bool,
 }
 
 impl Default for RenderDebugFlags {
@@ -26,7 +32,10 @@ impl Default for RenderDebugFlags {
             render_floor: true,
             render_walls: false,      // Disabled by default for floor debugging
             render_entities: false,     // Disabled by default for floor debugging
-            show_debug_info: false,
+            show_debug_overlay: false,
+            focus_render_2x2: false,
+            log_render_focus: false,
+            toon_filter: false,
         }
     }
 }
@@ -38,7 +47,10 @@ impl RenderDebugFlags {
             render_floor: true,
             render_walls: true,
             render_entities: true,
-            show_debug_info: false,
+            show_debug_overlay: false,
+            focus_render_2x2: false,
+            log_render_focus: false,
+            toon_filter: false,
         }
     }
     
@@ -48,7 +60,10 @@ impl RenderDebugFlags {
             render_floor: false,
             render_walls: false,
             render_entities: false,
-            show_debug_info: false,
+            show_debug_overlay: false,
+            focus_render_2x2: false,
+            log_render_focus: false,
+            toon_filter: false,
         }
     }
     
@@ -58,8 +73,10 @@ impl RenderDebugFlags {
             render_floor: true,
             render_walls: false,
             render_entities: false,
-            show_debug_info: false,
+            show_debug_overlay: false,
+            focus_render_2x2: false,
+            log_render_focus: false,
+            toon_filter: false,
         }
     }
 }
-

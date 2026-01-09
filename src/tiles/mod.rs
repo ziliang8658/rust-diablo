@@ -59,6 +59,22 @@ pub use sol::{SolData, MAXTILES};
 pub use til::{MegaTile, TilData};
 
 use crate::resources::ClxFrame;
+use anyhow::{anyhow, Error, Result};
+
+pub(crate) fn load_first_candidate<T>(
+    candidates: &[&'static str],
+    mut load: impl FnMut(&'static str) -> Result<T>,
+    kind: &'static str,
+) -> Result<T> {
+    let mut last_err: Option<Error> = None;
+    for &path in candidates {
+        match load(path) {
+            Ok(result) => return Ok(result),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("Failed to load {kind} file")))
+}
 
 /// Dungeon tileset textures
 ///

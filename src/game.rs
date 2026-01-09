@@ -813,9 +813,10 @@ impl Game {
                 }
                 sdl2::event::Event::KeyDown {
                     keycode: Some(keycode),
+                    keymod,
                     ..
                 } => {
-                    self.handle_keydown(keycode);
+                    self.handle_keydown(keycode, keymod);
                 }
                 sdl2::event::Event::KeyUp {
                     keycode: Some(keycode),
@@ -844,7 +845,11 @@ impl Game {
     }
 
     /// Handle keyboard key press
-    fn handle_keydown(&mut self, keycode: sdl2::keyboard::Keycode) {
+    fn handle_keydown(
+        &mut self,
+        keycode: sdl2::keyboard::Keycode,
+        keymod: sdl2::keyboard::Mod,
+    ) {
         match keycode {
             sdl2::keyboard::Keycode::Escape => {
                 self.running = false;
@@ -901,15 +906,58 @@ impl Game {
                 // Sync with world
                 self.world.render_debug = self.render_debug.clone();
             }
-            // Render Debug: Toggle Debug Info
+            // Render Debug: Toggle Debug Overlay / Focus Render
             sdl2::keyboard::Keycode::F7 => {
-                self.render_debug.show_debug_info = !self.render_debug.show_debug_info;
-                println!(
-                    "\n🎨 === Render Debug: Debug Info {} ===",
-                    if self.render_debug.show_debug_info { "ON" } else { "OFF" }
+                let shift = keymod.intersects(
+                    sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD,
                 );
+                let ctrl = keymod.intersects(
+                    sdl2::keyboard::Mod::LCTRLMOD | sdl2::keyboard::Mod::RCTRLMOD,
+                );
+
+                if shift {
+                    self.render_debug.focus_render_2x2 = !self.render_debug.focus_render_2x2;
+                    println!(
+                        "\n🎨 === Render Debug: Focus Render 2x2 {} ===",
+                        if self.render_debug.focus_render_2x2 {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                } else if ctrl {
+                    self.render_debug.log_render_focus = !self.render_debug.log_render_focus;
+                    println!(
+                        "\n🎨 === Render Debug: Log Render Focus {} ===",
+                        if self.render_debug.log_render_focus {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                } else {
+                    self.render_debug.show_debug_overlay = !self.render_debug.show_debug_overlay;
+                    println!(
+                        "\n🎨 === Render Debug: Debug Overlay {} ===",
+                        if self.render_debug.show_debug_overlay {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                }
                 self.print_render_debug_status();
                 // Sync with world
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Toggle Toon/Comic Filter
+            sdl2::keyboard::Keycode::F10 => {
+                self.render_debug.toon_filter = !self.render_debug.toon_filter;
+                println!(
+                    "\n🎨 === Render Debug: Toon Filter {} ===",
+                    if self.render_debug.toon_filter { "ON" } else { "OFF" }
+                );
+                self.print_render_debug_status();
                 self.world.render_debug = self.render_debug.clone();
             }
             // Render Debug: Reset All Layers
@@ -918,7 +966,10 @@ impl Game {
                     render_floor: true,
                     render_walls: true,
                     render_entities: true,
-                    show_debug_info: false,
+                    show_debug_overlay: false,
+                    focus_render_2x2: false,
+                    log_render_focus: false,
+                    toon_filter: false,
                 };
                 println!("\n🎨 === Render Debug: All Layers RESET (All Enabled) ===");
                 self.print_render_debug_status();
@@ -989,8 +1040,20 @@ impl Game {
             if self.render_debug.render_entities { "ON" } else { "OFF" }
         );
         println!(
-            "│ Debug Info (F7):      {:5} │",
-            if self.render_debug.show_debug_info { "ON" } else { "OFF" }
+            "│ Debug Overlay (F7):    {:5} │",
+            if self.render_debug.show_debug_overlay { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Focus Render (S+F7):   {:5} │",
+            if self.render_debug.focus_render_2x2 { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Log Focus (C+F7):      {:5} │",
+            if self.render_debug.log_render_focus { "ON" } else { "OFF" }
+        );
+        println!(
+            "│ Toon Filter (F10):    {:5} │",
+            if self.render_debug.toon_filter { "ON" } else { "OFF" }
         );
         println!("│ Reset All (F8)                  │");
         println!("│ Floor Only (F9)                 │");
@@ -1228,4 +1291,3 @@ impl Game {
         Ok(())
     }
 }
-

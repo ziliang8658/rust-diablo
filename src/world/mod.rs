@@ -25,6 +25,53 @@ pub use collision::{CollisionMap, TileType};
 pub use dungeon_map::{DungeonMap, DMAXX, DMAXY, MAXDUNX, MAXDUNY};
 pub use town::SimpleTown;
 
+#[derive(Clone, Copy, Debug)]
+struct RenderFocus {
+    enabled: bool,
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+}
+
+impl RenderFocus {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+        }
+    }
+
+    fn centered_2x2(view_world_x: i32, view_world_y: i32, border_size: i32) -> Self {
+        let cx = view_world_x + border_size;
+        let cy = view_world_y + border_size;
+        Self {
+            enabled: true,
+            min_x: cx,
+            max_x: cx + 1,
+            min_y: cy,
+            max_y: cy + 1,
+        }
+    }
+
+    fn contains(&self, dpiece_x: i32, dpiece_y: i32) -> bool {
+        !self.enabled
+            || (dpiece_x >= self.min_x
+                && dpiece_x <= self.max_x
+                && dpiece_y >= self.min_y
+                && dpiece_y <= self.max_y)
+    }
+}
+
+#[derive(Default)]
+struct RenderScratch {
+    luminance: Vec<u8>,
+    edges: Vec<bool>,
+}
+
 /// World - Game world representation
 pub struct World {
     /// Grid dimensions (in tiles)
@@ -54,6 +101,7 @@ pub struct World {
 
     // Render debug flags (for controlling rendering phases)
     pub render_debug: RenderDebugFlags,
+    render_scratch: RefCell<RenderScratch>,
 }
 
 // Isometric projection constants
@@ -120,6 +168,7 @@ impl World {
             dungeon_map: None,
             lighting,
             render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
+            render_scratch: RefCell::new(RenderScratch::default()),
         }
     }
 
@@ -404,11 +453,19 @@ impl World {
         Ok(())
     }
 
+    fn is_floor(sol: Option<&SolData>, piece_id: usize) -> bool {
+        sol.and_then(|sol| sol.get(piece_id))
+            .map(|props| {
+                !props.contains(crate::tiles::types::TileProperties::SOLID)
+                    && !props.contains(crate::tiles::types::TileProperties::BLOCK_MISSILE)
+            })
+            .unwrap_or(true)
+    }
+
     /// Render using TileTextureManager with proper tile decoding (Step 6.2)
     ///
     /// # Reference
     fn render_with_texture_manager(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
-        use crate::tiles::types::TileProperties;
         use std::io::Write;
 
 
@@ -445,19 +502,23 @@ impl World {
 
         // Debug: focus render to the 2x2 region around the view center (in dPiece coordinates).
         // This is intentionally simple (skip outside tiles) to help isolate rendering issues.
-        // Toggle via F7 (RenderDebugFlags.show_debug_info).
-        let focus_only_2x2 = self.render_debug.show_debug_info;
-        let (focus_min_x, focus_max_x, focus_min_y, focus_max_y) = if focus_only_2x2 {
-            let cx = view_x + BORDER_SIZE;
-            let cy = view_y + BORDER_SIZE;
-            (cx, cx + 1, cy, cy + 1)
+        // Toggle focus via Shift+F7 (RenderDebugFlags.focus_render_2x2).
+        let focus_render_2x2 = self.render_debug.focus_render_2x2;
+        let log_render_focus = self.render_debug.log_render_focus && focus_render_2x2;
+        let render_focus = if focus_render_2x2 {
+            RenderFocus::centered_2x2(view_x, view_y, BORDER_SIZE)
         } else {
-            (0, 0, 0, 0)
+            RenderFocus::disabled()
         };
-        if focus_only_2x2 {
+        if log_render_focus {
             println!(
                 "[RENDER_FOCUS_2X2] view_world=({}, {}), focus_dpiece_x=[{}..{}], focus_dpiece_y=[{}..{}]",
-                view_x, view_y, focus_min_x, focus_max_x, focus_min_y, focus_max_y
+                view_x,
+                view_y,
+                render_focus.min_x,
+                render_focus.max_x,
+                render_focus.min_y,
+                render_focus.max_y
             );
         }
 
@@ -530,12 +591,7 @@ impl World {
                     let dpiece_x = tx + BORDER_SIZE;
                     let dpiece_y = ty + BORDER_SIZE;
 
-                    if focus_only_2x2
-                        && !(dpiece_x >= focus_min_x
-                            && dpiece_x <= focus_max_x
-                            && dpiece_y >= focus_min_y
-                            && dpiece_y <= focus_max_y)
-                    {
+                    if !render_focus.contains(dpiece_x, dpiece_y) {
                         tx += 1;
                         ty -= 1;
                         sx += 64;
@@ -544,20 +600,11 @@ impl World {
                     if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
                         let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
                         // Check IsFloor
-                        let is_floor = if let Some(sol) = sol_data {
-                            if let Some(props) = sol.get(level_piece_id) {
-                                !props.contains(TileProperties::SOLID)
-                                    && !props.contains(TileProperties::BLOCK_MISSILE)
-                            } else {
-                                true
-                            }
-                        } else {
-                            true
-                        };
+                        let is_floor = Self::is_floor(sol_data, level_piece_id);
 
                         // Render the tile (frame 311 filtering is done in render_micro_tile)
                         if is_floor {
-                            if focus_only_2x2 {
+                            if log_render_focus {
                                 println!(
                                     "  - phase=floor dpiece=({}, {}) piece_id={}",
                                     dpiece_x, dpiece_y, level_piece_id
@@ -576,14 +623,7 @@ impl World {
                     } else {
                         // Out of bounds: render black invisible tile
                         // This ensures that areas outside the map are explicitly black
-                        use crate::math::Rect;
-                        
-                        // Create a black color manually since we can't easily import Color constructors here
-                        // assuming Color is available from imports
-                        let black = crate::renderer::Color { r: 0, g: 0, b: 0};
-                        
-                        let rect = Rect::new(sx, screen_y, 64, 32);
-                        engine.draw_rect(rect, black)?;
+                        self.draw_black_tile(engine, sx, screen_y)?;
                     }
 
                     tx += 1;
@@ -635,12 +675,7 @@ impl World {
                     let dpiece_x = tx + BORDER_SIZE;
                     let dpiece_y = ty + BORDER_SIZE;
 
-                    if focus_only_2x2
-                        && !(dpiece_x >= focus_min_x
-                            && dpiece_x <= focus_max_x
-                            && dpiece_y >= focus_min_y
-                            && dpiece_y <= focus_max_y)
-                    {
+                    if !render_focus.contains(dpiece_x, dpiece_y) {
                         tx += 1;
                         ty -= 1;
                         sx += 64;
@@ -653,22 +688,13 @@ impl World {
                     let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
 
                     // Check IsFloor (same logic as Phase 1)
-                    let is_floor = if let Some(sol) = sol_data {
-                        if let Some(props) = sol.get(level_piece_id) {
-                            !props.contains(TileProperties::SOLID)
-                                && !props.contains(TileProperties::BLOCK_MISSILE)
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    };
+                    let is_floor = Self::is_floor(sol_data, level_piece_id);
 
                     // ✅ KEY FIX: Render ALL tiles in Phase 2, not just non-floor tiles
                     // Reference: C++ DrawTileContent() Line 996 calls DrawDungeon() for ALL tiles
                     // Even if out of bounds (piece_id = 0), we still call draw_cell_at
                     // draw_cell_at will handle piece_id = 0 gracefully (no rendering)
-                    if focus_only_2x2 {
+                    if log_render_focus {
                         println!(
                             "  - phase=cell dpiece=({}, {}) piece_id={}",
                             dpiece_x, dpiece_y, level_piece_id
@@ -1082,7 +1108,7 @@ impl World {
                  }
 
                  // Convert indexed pixels to RGBA using palette
-                 let mgr = texture_mgr.borrow();
+                let mgr = texture_mgr.borrow();
                  let rgba_pixels = mgr.palette().indices_to_rgba(&indexed_pixels, true);
                 drop(mgr);
 
@@ -1091,10 +1117,23 @@ impl World {
                     return Ok(());
                 }
 
-                // Skip if all pixels are transparent
+                let mut rgba_pixels = rgba_pixels;
+
+                // Skip if all pixels are transparent.
+                // This prevents doing toon edge detection on fully transparent tiles.
                 let has_visible_pixels = rgba_pixels.chunks(4).any(|p| p[3] > 0);
                 if !has_visible_pixels {
                     return Ok(());
+                }
+
+                if self.render_debug.toon_filter {
+                    let mut scratch = self.render_scratch.borrow_mut();
+                    Self::apply_toon_filter(
+                        &mut rgba_pixels,
+                        width as usize,
+                        height as usize,
+                        &mut scratch,
+                    );
                 }
 
                 let texture_id = format!("tile_{}_{}", level_piece_id, block_index);
@@ -1110,6 +1149,99 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Apply a simple toon/comic post-process to a tile's RGBA buffer.
+    /// - Posterize colors to fewer bands.
+    /// - Add black outlines based on Sobel edge detection on luminance.
+    fn apply_toon_filter(
+        pixels: &mut [u8],
+        width: usize,
+        height: usize,
+        scratch: &mut RenderScratch,
+    ) {
+        let expected = width
+            .checked_mul(height)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(0);
+        if expected == 0 || pixels.len() != expected {
+            return;
+        }
+
+        // Posterize step: reduce color bands for a flat look.
+        // Use u16 math to avoid `256` overflowing `u8` literals.
+        const POSTERIZE_LEVELS: u16 = 6;
+        const EDGE_THRESHOLD: i32 = 600;
+        const SOBEL_KX: [[i32; 3]; 3] = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
+        const SOBEL_KY: [[i32; 3]; 3] = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
+
+        let step: u16 = (256u16 / POSTERIZE_LEVELS).max(1);
+
+        scratch.luminance.resize(width * height, 0);
+        scratch.luminance.fill(0);
+        let luminance = &mut scratch.luminance;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) * 4;
+                let a = pixels[idx + 3];
+                if a == 0 {
+                    continue;
+                }
+                let r = pixels[idx];
+                let g = pixels[idx + 1];
+                let b = pixels[idx + 2];
+
+                // Compute luminance for edge detection (simple luma approx).
+                let l = (r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100;
+                luminance[y * width + x] = l as u8;
+
+                // Posterize color channels.
+                pixels[idx] = ((r as u16 / step) * step).min(255) as u8;
+                pixels[idx + 1] = ((g as u16 / step) * step).min(255) as u8;
+                pixels[idx + 2] = ((b as u16 / step) * step).min(255) as u8;
+            }
+        }
+
+        // Skip edge detection if the tile is too small for a 3x3 kernel.
+        if width < 3 || height < 3 {
+            return;
+        }
+
+        scratch.edges.resize(width * height, false);
+        scratch.edges.fill(false);
+        let edges = &mut scratch.edges;
+
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let mut gx: i32 = 0;
+                let mut gy: i32 = 0;
+                for j in 0..3 {
+                    for i in 0..3 {
+                        let v = luminance[(y + j - 1) * width + (x + i - 1)] as i32;
+                        gx += v * SOBEL_KX[j][i];
+                        gy += v * SOBEL_KY[j][i];
+                    }
+                }
+                // Use L1 magnitude to avoid sqrt.
+                let mag = gx.abs() + gy.abs();
+                if mag > EDGE_THRESHOLD {
+                    edges[y * width + x] = true;
+                }
+            }
+        }
+
+        // Apply outlines: turn edge pixels black (keep alpha).
+        for y in 0..height {
+            for x in 0..width {
+                if edges[y * width + x] {
+                    let idx = (y * width + x) * 4;
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                }
+            }
+        }
     }
 }
 
