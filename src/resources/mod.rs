@@ -18,7 +18,7 @@ pub mod libmpq_ffi;
 pub mod mpq_wrapper;
 
 // Re-export for convenience
-pub use cl2::Cl2Sprite;
+pub use cl2::{Cl2DirectionalSpriteSheet, Cl2Sprite};
 pub use clx::{ClxFrame, ClxFrameHeader, ClxHeader, ClxSprite};
 pub use dungeon_cel::{DungeonCelFrame, DungeonCelSprite};
 pub use mpq::MpqManager;

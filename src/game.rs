@@ -1,11 +1,10 @@
-use crate::assets::AssetPaths;
 use crate::debug::RenderDebugFlags;
 use crate::engine::Direction;
 use crate::engine::Engine;
 use crate::entity::Entity;
 use crate::math::{Point, Rect};
 use crate::renderer::Camera;
-use crate::resources::{Cl2Sprite, MpqManager, Palette, PcxImage, ResourceManager};
+use crate::resources::{Cl2DirectionalSpriteSheet, MpqManager, Palette, PcxImage, ResourceManager};
 use crate::sprite::{Animation, AnimationState};
 use crate::tiles::{LevelCelBlock, MegaTile, MinData, SolData, TilData, TileProperties, TileType};
 use crate::world::{SimpleTown, World};
@@ -13,7 +12,7 @@ use crate::world::{SimpleTown, World};
 ///
 /// This module contains the main game loop and game state management.
 /// It's the central coordinator for all game systems.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::Instant;
 
 /// Create simple test dungeon data with controlled frame indices
@@ -89,6 +88,134 @@ fn create_test_dungeon_data() -> (MinData, TilData, SolData) {
     (min_data, til_data, sol_data)
 }
 
+fn load_directional_player_animation_set(
+    engine: &mut Engine,
+    mpq_manager: &mut MpqManager,
+    palette: &Palette,
+    player: &mut Entity,
+    idle_path: &str,
+    walk_path: Option<&str>,
+    sprite_name: &str,
+) -> Result<(usize, usize, u32, u32)> {
+    let idle_data = mpq_manager
+        .find_file(idle_path)
+        .ok_or_else(|| anyhow::anyhow!("Idle CL2 not found: {}", idle_path))?;
+
+    let idle_sheet = Cl2DirectionalSpriteSheet::from_bytes(&idle_data, 96)
+        .with_context(|| format!("Failed to parse idle CL2: {}", idle_path))?;
+    if idle_sheet.direction_count() == 0 {
+        return Err(anyhow::anyhow!(
+            "Idle CL2 sheet has no directions: {}",
+            idle_path
+        ));
+    }
+
+    let walk_sheet = if let Some(walk_path) = walk_path {
+        if let Some(walk_data) = mpq_manager.find_file(walk_path) {
+            Cl2DirectionalSpriteSheet::from_bytes(&walk_data, 96)
+                .with_context(|| format!("Failed to parse walk CL2: {}", walk_path))?
+        } else {
+            eprintln!(
+                "⚠ Walk animation not found: {} (fallback to idle sheet)",
+                walk_path
+            );
+            idle_sheet.clone()
+        }
+    } else {
+        idle_sheet.clone()
+    };
+
+    let fallback_idle = idle_sheet.direction(0).cloned().ok_or_else(|| {
+        anyhow::anyhow!("Idle CL2 sheet has no fallback direction: {}", idle_path)
+    })?;
+    let fallback_walk = walk_sheet
+        .direction(0)
+        .cloned()
+        .unwrap_or_else(|| fallback_idle.clone());
+
+    let first_frame = fallback_idle
+        .frames
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Idle CL2 sheet has no frames: {}", idle_path))?;
+    let sprite_width = first_frame.width as u32;
+    let sprite_height = first_frame.height as u32;
+
+    player.sprite_id = Some(sprite_name.to_string());
+    player.size = (sprite_width, sprite_height);
+
+    if let Some(ref mut anim_controller) = player.animation {
+        for (direction_index, direction) in Direction::walk_animation_order().iter().enumerate() {
+            let idle_sprite = idle_sheet
+                .direction(direction_index)
+                .unwrap_or(&fallback_idle);
+            let walk_sprite = walk_sheet
+                .direction(direction_index)
+                .unwrap_or(&fallback_walk);
+
+            for (frame_index, frame) in idle_sprite.frames.iter().enumerate() {
+                let texture_id = format!(
+                    "{}_idle_{}_{}",
+                    sprite_name,
+                    direction.animation_suffix(),
+                    frame_index
+                );
+                let rgba_data = frame.to_rgba(palette);
+                if let Err(e) = engine.load_texture_from_rgba(
+                    &texture_id,
+                    &rgba_data,
+                    frame.width as u32,
+                    frame.height as u32,
+                ) {
+                    eprintln!("⚠ Failed to create idle texture {}: {}", texture_id, e);
+                }
+            }
+
+            for (frame_index, frame) in walk_sprite.frames.iter().enumerate() {
+                let texture_id = format!(
+                    "{}_walk_{}_{}",
+                    sprite_name,
+                    direction.animation_suffix(),
+                    frame_index
+                );
+                let rgba_data = frame.to_rgba(palette);
+                if let Err(e) = engine.load_texture_from_rgba(
+                    &texture_id,
+                    &rgba_data,
+                    frame.width as u32,
+                    frame.height as u32,
+                ) {
+                    eprintln!("⚠ Failed to create walk texture {}: {}", texture_id, e);
+                }
+            }
+
+            let idle_frames =
+                vec![Rect::new(0, 0, sprite_width, sprite_height); idle_sprite.frames.len()];
+            let walk_frames =
+                vec![Rect::new(0, 0, sprite_width, sprite_height); walk_sprite.frames.len()];
+
+            anim_controller.add_directional_animation(
+                AnimationState::Idle,
+                *direction,
+                Animation::new(idle_frames, 0.15, true),
+            );
+            anim_controller.add_directional_animation(
+                AnimationState::Walk,
+                *direction,
+                Animation::new(walk_frames, 0.1, false),
+            );
+        }
+
+        anim_controller.set_state_direction(AnimationState::Idle, Direction::South);
+    }
+
+    Ok((
+        fallback_idle.frames.len(),
+        fallback_walk.frames.len(),
+        sprite_width,
+        sprite_height,
+    ))
+}
+
 /// Scene type enum for different game scenes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneType {
@@ -143,13 +270,6 @@ impl Game {
             .text_input()
             .stop();
 
-        // Load player sprite
-        let player_sprite_path = AssetPaths::sprite("player.png");
-        if let Err(e) = engine.load_texture("player", &player_sprite_path) {
-            eprintln!("Warning: Failed to load player sprite: {}", e);
-            eprintln!("Player will be rendered as a colored rectangle.");
-        }
-
         // Step 6.4.1: Load palette first (needed for lighting system)
         // Initialize MPQ manager
         let mut mpq_manager = MpqManager::new();
@@ -171,10 +291,7 @@ impl Game {
         }
 
         // Try to load palette file
-        let palette_paths = vec![
-            "levels/towndata/town.pal",
-            "levels\\towndata\\town.pal",
-        ];
+        let palette_paths = vec!["levels/towndata/town.pal", "levels\\towndata\\town.pal"];
 
         let default_palette = Palette::new(); // Default palette (all black)
         let palette = if mpq_loaded {
@@ -357,179 +474,95 @@ impl Game {
             }
         }
 
-        // Phase 5: Load CLX/CL2 sprites (idle and walk animations)
+        // Phase 5: Load CLX/CL2 sprites with directional animation sheets.
         let mut idle_frame_count = 0;
         let mut walk_frame_count = 0;
         let mut clx_sprite_name = String::new();
+        let mut sprite_width = 96u32;
+        let mut sprite_height = 96u32;
+        let mut animations_loaded = false;
 
         if mpq_loaded && loaded_palette.is_some() {
-            // Load idle and walk animations
             let animation_sets = vec![
                 // (idle_path, walk_path, sprite_name)
                 (
                     "plrgfx/warrior/wmn/wmnas.cl2",
-                    "plrgfx/warrior/wmn/wmnaw.cl2",
+                    Some("plrgfx/warrior/wmn/wmnaw.cl2"),
                     "warrior",
                 ),
                 (
                     "plrgfx\\warrior\\wmn\\wmnas.cl2",
-                    "plrgfx\\warrior\\wmn\\wmnaw.cl2",
+                    Some("plrgfx\\warrior\\wmn\\wmnaw.cl2"),
                     "warrior",
                 ),
                 (
                     "plrgfx/warrior/wmd/wmdas.cl2",
-                    "plrgfx/warrior/wmd/wmdaw.cl2",
+                    Some("plrgfx/warrior/wmd/wmdaw.cl2"),
                     "warrior",
                 ),
                 (
                     "plrgfx\\warrior\\wmd\\wmdas.cl2",
-                    "plrgfx\\warrior\\wmd\\wmdaw.cl2",
+                    Some("plrgfx\\warrior\\wmd\\wmdaw.cl2"),
                     "warrior",
                 ),
             ];
 
-            let mut animations_loaded = false;
             let palette = loaded_palette.as_ref().unwrap();
 
             for (idle_path, walk_path, sprite_name) in &animation_sets {
-                // Try to load idle animation
-                let idle_data = mpq_manager.find_file(idle_path);
-                let walk_data = mpq_manager.find_file(walk_path);
-
-                if idle_data.is_none() {
-                    continue;
-                }
-
-                // Load idle animation
-                let frame_width = 96u16;
-                match Cl2Sprite::from_bytes(&idle_data.unwrap(), frame_width) {
-                    Ok(idle_sprite) => {
-                        println!("✓ Loaded idle CL2: {}", idle_path);
-                        println!("  Idle frames: {}", idle_sprite.frames.len());
-
-                        // Load idle frames as textures
-                        for (i, frame) in idle_sprite.frames.iter().enumerate() {
-                            let rgba_data = frame.to_rgba(palette);
-                            let texture_id = format!("{}_idle_{}", sprite_name, i);
-
-                            if let Err(e) = engine.load_texture_from_rgba(
-                                &texture_id,
-                                &rgba_data,
-                                frame.width as u32,
-                                frame.height as u32,
-                            ) {
-                                eprintln!("⚠ Failed to create idle texture {}: {}", i, e);
-                            } else {
-                                idle_frame_count += 1;
+                if let Some(player) = world.get_entity_mut(player_index) {
+                    match load_directional_player_animation_set(
+                        &mut engine,
+                        &mut mpq_manager,
+                        palette,
+                        player,
+                        idle_path,
+                        *walk_path,
+                        sprite_name,
+                    ) {
+                        Ok((idle_count, walk_count, width, height)) => {
+                            println!("✓ Loaded directional idle CL2: {}", idle_path);
+                            if let Some(walk_path) = walk_path {
+                                println!("✓ Loaded directional walk CL2: {}", walk_path);
                             }
+                            println!("  Idle frames per direction: {}", idle_count);
+                            println!("  Walk frames per direction: {}", walk_count);
+                            sprite_width = width;
+                            sprite_height = height;
+                            idle_frame_count = idle_count;
+                            walk_frame_count = walk_count;
+                            clx_sprite_name = sprite_name.to_string();
+                            animations_loaded = true;
+                            break;
                         }
-
-                        // Try to load walk animation
-                        if let Some(walk_data_bytes) = walk_data {
-                            match Cl2Sprite::from_bytes(&walk_data_bytes, frame_width) {
-                                Ok(walk_sprite) => {
-                                    println!("✓ Loaded walk CL2: {}", walk_path);
-                                    println!("  Walk frames: {}", walk_sprite.frames.len());
-
-                                    // Load walk frames as textures
-                                    for (i, frame) in walk_sprite.frames.iter().enumerate() {
-                                        let rgba_data = frame.to_rgba(palette);
-                                        let texture_id = format!("{}_walk_{}", sprite_name, i);
-
-                                        if let Err(e) = engine.load_texture_from_rgba(
-                                            &texture_id,
-                                            &rgba_data,
-                                            frame.width as u32,
-                                            frame.height as u32,
-                                        ) {
-                                            eprintln!(
-                                                "⚠ Failed to create walk texture {}: {}",
-                                                i, e
-                                            );
-                                        } else {
-                                            walk_frame_count += 1;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("⚠ Failed to parse walk CL2: {}", e);
-                                }
-                            }
-                        } else {
-                            eprintln!("⚠ Walk animation not found: {}", walk_path);
+                        Err(e) => {
+                            eprintln!("⚠ Failed to load player animation set {}: {}", idle_path, e);
                         }
-
-                        clx_sprite_name = sprite_name.to_string();
-                        animations_loaded = true;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("⚠ Failed to parse idle CL2 from {}: {}", idle_path, e);
                     }
                 }
             }
 
             if !animations_loaded {
                 eprintln!("⚠ Could not load warrior animations");
-            }
-        }
-
-        println!("=== Step 5.2 Integration Complete ===\n");
-
-        // Phase 6: Update player sprite if animations were loaded
-        let mut sprite_width = 96u32;
-        let mut sprite_height = 96u32;
-
-        if idle_frame_count > 0 && !clx_sprite_name.is_empty() {
-            // Get the first frame dimensions
-            if let Some(first_frame_texture) = engine
-                .texture_manager()
-                .get(&format!("{}_idle_0", clx_sprite_name))
-            {
-                sprite_width = first_frame_texture.width();
-                sprite_height = first_frame_texture.height();
+            } else {
                 println!("✓ Sprite size: {}x{}", sprite_width, sprite_height);
-            }
-
-            if let Some(player) = world.get_entity_mut(player_index) {
                 println!(
                     "✓ Updating player to use warrior sprite: {}",
                     clx_sprite_name
                 );
-                player.sprite_id = Some(clx_sprite_name.clone());
-                player.size = (sprite_width, sprite_height);
-                println!("  Player size set to: {}x{}", player.size.0, player.size.1);
-
-                // Reconfigure animations
-                if let Some(ref mut anim_controller) = player.animation {
-                    // Idle animation
-                    let idle_frames: Vec<Rect> = (0..idle_frame_count)
-                        .map(|_| Rect::new(0, 0, 64, 64))
-                        .collect();
-                    let idle_anim = Animation::new(idle_frames, 0.15, true);
-                    anim_controller.add_animation(AnimationState::Idle, idle_anim);
-
-                    // Walk animation
-                    if walk_frame_count > 0 {
-                        let walk_frames: Vec<Rect> = (0..walk_frame_count)
-                            .map(|_| Rect::new(0, 0, 64, 64))
-                            .collect();
-                        let walk_anim = Animation::new(walk_frames, 0.1, true);
-                        anim_controller.add_animation(AnimationState::Walk, walk_anim);
-                        println!(
-                            "  Configured walk animation with {} frames",
-                            walk_frame_count
-                        );
-                    }
-
-                    anim_controller.set_state(AnimationState::Idle);
-                    println!(
-                        "  Configured idle animation with {} frames",
-                        idle_frame_count
-                    );
-                }
+                println!("  Player size set to: {}x{}", sprite_width, sprite_height);
+                println!(
+                    "  Configured idle animation with {} frame(s) per direction",
+                    idle_frame_count
+                );
+                println!(
+                    "  Configured walk animation with {} frame(s) per direction",
+                    walk_frame_count
+                );
             }
         }
+
+        println!("=== Step 5.2 Integration Complete ===\n");
 
         // Step 5.3: Initialize ResourceManager and load town scene
         println!("\n=== Step 5.3: ResourceManager and Town Scene ===");
@@ -845,11 +878,7 @@ impl Game {
     }
 
     /// Handle keyboard key press
-    fn handle_keydown(
-        &mut self,
-        keycode: sdl2::keyboard::Keycode,
-        keymod: sdl2::keyboard::Mod,
-    ) {
+    fn handle_keydown(&mut self, keycode: sdl2::keyboard::Keycode, keymod: sdl2::keyboard::Mod) {
         match keycode {
             sdl2::keyboard::Keycode::Escape => {
                 self.running = false;
@@ -878,7 +907,11 @@ impl Game {
                 self.render_debug.render_floor = !self.render_debug.render_floor;
                 println!(
                     "\n🎨 === Render Debug: Floor Layer {} ===",
-                    if self.render_debug.render_floor { "ON" } else { "OFF" }
+                    if self.render_debug.render_floor {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 );
                 self.print_render_debug_status();
                 // Sync with world
@@ -889,7 +922,11 @@ impl Game {
                 self.render_debug.render_walls = !self.render_debug.render_walls;
                 println!(
                     "\n🎨 === Render Debug: Wall Layer {} ===",
-                    if self.render_debug.render_walls { "ON" } else { "OFF" }
+                    if self.render_debug.render_walls {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 );
                 self.print_render_debug_status();
                 // Sync with world
@@ -900,7 +937,11 @@ impl Game {
                 self.render_debug.render_entities = !self.render_debug.render_entities;
                 println!(
                     "\n🎨 === Render Debug: Entity Layer {} ===",
-                    if self.render_debug.render_entities { "ON" } else { "OFF" }
+                    if self.render_debug.render_entities {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 );
                 self.print_render_debug_status();
                 // Sync with world
@@ -908,12 +949,10 @@ impl Game {
             }
             // Render Debug: Toggle Debug Overlay / Focus Render
             sdl2::keyboard::Keycode::F7 => {
-                let shift = keymod.intersects(
-                    sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD,
-                );
-                let ctrl = keymod.intersects(
-                    sdl2::keyboard::Mod::LCTRLMOD | sdl2::keyboard::Mod::RCTRLMOD,
-                );
+                let shift = keymod
+                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
+                let ctrl = keymod
+                    .intersects(sdl2::keyboard::Mod::LCTRLMOD | sdl2::keyboard::Mod::RCTRLMOD);
 
                 if shift {
                     self.render_debug.focus_render_2x2 = !self.render_debug.focus_render_2x2;
@@ -955,7 +994,11 @@ impl Game {
                 self.render_debug.toon_filter = !self.render_debug.toon_filter;
                 println!(
                     "\n🎨 === Render Debug: Toon Filter {} ===",
-                    if self.render_debug.toon_filter { "ON" } else { "OFF" }
+                    if self.render_debug.toon_filter {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 );
                 self.print_render_debug_status();
                 self.world.render_debug = self.render_debug.clone();
@@ -1022,6 +1065,62 @@ impl Game {
         // Placeholder for future mouse handling
     }
 
+    /// Return the direction currently requested by held movement keys.
+    fn current_input_direction(&self) -> Direction {
+        if self.key_up && self.key_left {
+            Direction::NorthWest
+        } else if self.key_up && self.key_right {
+            Direction::NorthEast
+        } else if self.key_down && self.key_left {
+            Direction::SouthWest
+        } else if self.key_down && self.key_right {
+            Direction::SouthEast
+        } else if self.key_up {
+            Direction::North
+        } else if self.key_down {
+            Direction::South
+        } else if self.key_left {
+            Direction::West
+        } else if self.key_right {
+            Direction::East
+        } else {
+            Direction::None
+        }
+    }
+
+    /// Try to start one tile step for the player.
+    ///
+    /// This mirrors the original's split between `StartWalkAnimation()` and
+    /// `HandleWalkMode()`: collision is checked before the mutable player
+    /// borrow, then the entity is switched to the walk animation.
+    fn try_start_player_walk(&mut self, direction: Direction) -> bool {
+        if !direction.is_moving() {
+            return false;
+        }
+
+        let can_walk = if let Some(player) = self.world.entities().get(self.player_index) {
+            if player.walking {
+                false
+            } else {
+                let (dx, dy) = direction.to_tile_offset();
+                let target = Point::new(player.tile_position.x + dx, player.tile_position.y + dy);
+                self.world.is_tile_walkable(target.x, target.y)
+            }
+        } else {
+            false
+        };
+
+        if !can_walk {
+            return false;
+        }
+
+        if let Some(player) = self.world.get_entity_mut(self.player_index) {
+            player.start_walk::<fn(i32, i32) -> bool>(direction, None)
+        } else {
+            false
+        }
+    }
+
     /// Print render debug status (like C++ PrintStatus)
     fn print_render_debug_status(&self) {
         println!("┌─────────────────────────────────┐");
@@ -1029,31 +1128,59 @@ impl Game {
         println!("├─────────────────────────────────┤");
         println!(
             "│ Floor Layer (F4):     {:5} │",
-            if self.render_debug.render_floor { "ON" } else { "OFF" }
+            if self.render_debug.render_floor {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Wall Layer (F5):      {:5} │",
-            if self.render_debug.render_walls { "ON" } else { "OFF" }
+            if self.render_debug.render_walls {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Entity Layer (F6):    {:5} │",
-            if self.render_debug.render_entities { "ON" } else { "OFF" }
+            if self.render_debug.render_entities {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Debug Overlay (F7):    {:5} │",
-            if self.render_debug.show_debug_overlay { "ON" } else { "OFF" }
+            if self.render_debug.show_debug_overlay {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Focus Render (S+F7):   {:5} │",
-            if self.render_debug.focus_render_2x2 { "ON" } else { "OFF" }
+            if self.render_debug.focus_render_2x2 {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Log Focus (C+F7):      {:5} │",
-            if self.render_debug.log_render_focus { "ON" } else { "OFF" }
+            if self.render_debug.log_render_focus {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!(
             "│ Toon Filter (F10):    {:5} │",
-            if self.render_debug.toon_filter { "ON" } else { "OFF" }
+            if self.render_debug.toon_filter {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!("│ Reset All (F8)                  │");
         println!("│ Floor Only (F9)                 │");
@@ -1075,62 +1202,10 @@ impl Game {
             .as_secs_f32();
         self.last_frame_time = current_time;
 
-        // Tile-based movement: Handle player input
-        // First, determine direction from input
-        let mut direction = Direction::None;
-        if self.key_up && self.key_left {
-            direction = Direction::NorthWest;
-        } else if self.key_up && self.key_right {
-            direction = Direction::NorthEast;
-        } else if self.key_down && self.key_left {
-            direction = Direction::SouthWest;
-        } else if self.key_down && self.key_right {
-            direction = Direction::SouthEast;
-        } else if self.key_up {
-            direction = Direction::North;
-        } else if self.key_down {
-            direction = Direction::South;
-        } else if self.key_left {
-            direction = Direction::West;
-        } else if self.key_right {
-            direction = Direction::East;
-        }
+        let direction = self.current_input_direction();
 
-        // Try to start walking
-        // First, check player state and calculate target tile (immutable borrow)
-        let (should_start_walk, can_walk) = if direction.is_moving() {
-            if let Some(player) = self.world.entities().get(self.player_index) {
-                if !player.walking {
-                    // Calculate target tile
-                    let (dx, dy) = direction.to_tile_offset();
-                    let target = Point::new(player.tile_position.x + dx, player.tile_position.y + dy);
-                    // Check collision before mutable borrow
-                    // Use World::is_tile_walkable which handles coordinate conversion correctly
-                    let walkable = self.world.is_tile_walkable(target.x, target.y);
-                    (true, walkable)
-                } else {
-                    (false, false)
-                }
-            } else {
-                (false, false)
-            }
-        } else {
-            (false, false)
-        };
-
-        // Then, get player mutably and start walking or update direction
-        if should_start_walk && can_walk {
-            // Now get player mutably and start walking
-            // We already checked collision, so pass None to skip the check in start_walk
-            if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                let _ = player.start_walk::<fn(i32, i32) -> bool>(direction, None);
-            }
-        } else if !direction.is_moving() {
-            // No input, just update facing direction
-            if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                player.set_direction(direction);
-            }
-        }
+        // Start from idle immediately, preserving the existing responsive input feel.
+        self.try_start_player_walk(direction);
 
         // Update world (includes tile-based entity updates)
         match self.current_scene {
@@ -1145,18 +1220,21 @@ impl Game {
             }
         }
 
+        // DevilutionX commits a finished walk to stand in `DoWalk()`, then calls
+        // `CheckNewPath()` in the same player-processing tick before rendering.
+        // If movement input is still held, start the next step here so the
+        // rendered frame stays in Walk instead of briefly flashing Idle.
+        self.try_start_player_walk(direction);
+
         // Update camera to follow player (convert tile position to pixel position)
         let tile_size = self.world.tile_size;
-        let player_pos = self
-            .world
-            .get_entity_mut(self.player_index)
-            .map(|player| {
-                // Convert tile position to world pixel position
-                Point::new(
-                    player.tile_position.x * tile_size as i32,
-                    player.tile_position.y * tile_size as i32,
-                )
-            });
+        let player_pos = self.world.get_entity_mut(self.player_index).map(|player| {
+            // Convert tile position to world pixel position
+            Point::new(
+                player.tile_position.x * tile_size as i32,
+                player.tile_position.y * tile_size as i32,
+            )
+        });
 
         if let Some(pos) = player_pos {
             match self.current_scene {
@@ -1216,8 +1294,7 @@ impl Game {
 
             // Reset player walking state when switching scenes
             if let Some(player) = self.world.get_entity_mut(self.player_index) {
-                player.walking = false;
-                player.walk_direction = None;
+                player.cancel_walk();
             }
         }
     }
@@ -1247,6 +1324,8 @@ impl Game {
                 let is_moving = player.walking;
                 let sprite_base = "warrior_town";
                 let state = if is_moving { "walk" } else { "idle" };
+                let direction = player.render_direction();
+                let walking_offset = player.walking_pixel_offset(tile_size as i32);
 
                 // Get texture IDs for current animation
                 if let Some(ref res_mgr) = self.resource_manager {
@@ -1263,10 +1342,19 @@ impl Game {
                         };
 
                         let texture_id = &texture_ids[frame_index];
+                        let directional_texture_id = format!(
+                            "{}_{}_{}_{}",
+                            sprite_base,
+                            state,
+                            direction.animation_suffix(),
+                            frame_index
+                        );
 
                         // Calculate player position on screen (convert tile to pixel, then to screen)
-                        let player_world_pixel_x = player.tile_position.x * tile_size as i32;
-                        let player_world_pixel_y = player.tile_position.y * tile_size as i32;
+                        let player_world_pixel_x =
+                            player.tile_position.x * tile_size as i32 + walking_offset.x;
+                        let player_world_pixel_y =
+                            player.tile_position.y * tile_size as i32 + walking_offset.y;
                         let player_screen_x = player_world_pixel_x - (player.size.0 as i32 / 2);
                         let player_screen_y = player_world_pixel_y - (player.size.1 as i32 / 2);
 
@@ -1277,9 +1365,15 @@ impl Game {
                             player.size.1,
                         );
 
-                        let _ = self
-                            .engine
-                            .draw_texture_by_id(texture_id, None, player_rect);
+                        if !self.engine.draw_texture_by_id(
+                            &directional_texture_id,
+                            None,
+                            player_rect,
+                        )? {
+                            let _ = self
+                                .engine
+                                .draw_texture_by_id(texture_id, None, player_rect);
+                        }
                     }
                 }
             }

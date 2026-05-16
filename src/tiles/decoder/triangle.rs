@@ -138,7 +138,10 @@ pub fn decode_left_triangle(raw_data: &[u8]) -> Result<Vec<u8>> {
     }
     width -= 2;
     if src + width > raw_data.len() {
-        bail!("LeftTriangle: insufficient data for last row (need {})", width);
+        bail!(
+            "LeftTriangle: insufficient data for last row (need {})",
+            width
+        );
     }
     output[dst..dst + width].copy_from_slice(&raw_data[src..src + width]);
 
@@ -242,7 +245,10 @@ pub fn decode_right_triangle(raw_data: &[u8]) -> Result<Vec<u8>> {
     // Reference: Source/levels/reencode_dun_cels.cpp:89-91
     width -= 2;
     if src + width > raw_data.len() {
-        bail!("RightTriangle: insufficient data for last row (need {})", width);
+        bail!(
+            "RightTriangle: insufficient data for last row (need {})",
+            width
+        );
     }
     let offset = DUN_FRAME_WIDTH - width;
     output[dst + offset..dst + offset + width].copy_from_slice(&raw_data[src..src + width]);

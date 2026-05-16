@@ -159,21 +159,21 @@ impl CollisionMap {
             from
         }
     }
-    
+
     /// Convert collision map to block map for lighting system
-    /// 
+    ///
     /// # Returns
     /// 2D array where true = blocking (wall), false = non-blocking (floor)
     pub fn to_block_map(&self) -> [[bool; crate::lighting::MAXDUNY]; crate::lighting::MAXDUNX] {
         let mut block_map = [[false; crate::lighting::MAXDUNY]; crate::lighting::MAXDUNX];
-        
+
         for y in 0..self.height.min(crate::lighting::MAXDUNY) {
             for x in 0..self.width.min(crate::lighting::MAXDUNX) {
                 // Wall and solid tiles block light
                 block_map[x][y] = self.tiles[y][x].is_solid();
             }
         }
-        
+
         block_map
     }
 }

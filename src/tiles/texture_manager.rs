@@ -360,7 +360,11 @@ impl TileTextureManager {
     /// * `block_index` - Block index within piece
     ///
     /// # Returns
-    pub fn get_indexed_tile_pixels(&mut self, piece_index: usize, block_index: usize) -> Result<Vec<u8>> {
+    pub fn get_indexed_tile_pixels(
+        &mut self,
+        piece_index: usize,
+        block_index: usize,
+    ) -> Result<Vec<u8>> {
         // Get PieceMicros from MIN data
         let piece = self
             .min_data
@@ -383,12 +387,9 @@ impl TileTextureManager {
         // Get indexed pixels
         let indexed_pixels = self.get_indexed_tile(frame_idx, tile_type)?;
         let indexed_pixels_vec = indexed_pixels.to_vec();
-        
 
         Ok(indexed_pixels_vec)
     }
-
-
 
     /// Get decoded foliage (grass) for floor tiles with TransparentSquare type
     ///
@@ -606,7 +607,6 @@ impl TileTextureManager {
         self.indexed_cache.insert(cache_key, decoded);
         Ok(&self.indexed_cache[&cache_key])
     }
-
 
     /// Get a CEL frame by index (supports both main and special CEL)
     ///

@@ -123,7 +123,7 @@ impl Palette {
     ///
     /// # Returns
     /// RGBA image data (4 bytes per pixel: R, G, B, A)
-        pub fn indices_to_rgba(&self, indices: &[u8], transparent: bool) -> Vec<u8> {
+    pub fn indices_to_rgba(&self, indices: &[u8], transparent: bool) -> Vec<u8> {
         let mut rgba = Vec::with_capacity(indices.len() * 4);
         for &index in indices {
             let color = self.to_rgba(index, transparent);

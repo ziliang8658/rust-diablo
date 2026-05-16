@@ -30,8 +30,8 @@ impl Default for RenderDebugFlags {
         // Default: Only render floor layer for easier debugging
         Self {
             render_floor: true,
-            render_walls: false,      // Disabled by default for floor debugging
-            render_entities: false,     // Disabled by default for floor debugging
+            render_walls: false,    // Disabled by default for floor debugging
+            render_entities: false, // Disabled by default for floor debugging
             show_debug_overlay: false,
             focus_render_2x2: false,
             log_render_focus: false,
@@ -53,7 +53,7 @@ impl RenderDebugFlags {
             toon_filter: false,
         }
     }
-    
+
     /// Create debug flags with all layers disabled
     pub fn all_disabled() -> Self {
         Self {
@@ -66,7 +66,7 @@ impl RenderDebugFlags {
             toon_filter: false,
         }
     }
-    
+
     /// Create debug flags with only floor layer enabled (for debugging)
     pub fn floor_only() -> Self {
         Self {

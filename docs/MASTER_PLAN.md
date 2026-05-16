@@ -21,7 +21,8 @@
 - ✅ Step 6.1: 瓦片系统基础设施 (~400行代码)
 - ✅ Step 6.2: 地图、瓦片和纹理渲染系统 (~2624行代码)
 - ✅ Step 6.3: 墙体瓦片和完整渲染系统 (~2500行代码)
-- 📝 Step 6.4: 光照系统与8方向玩家动画 (设计完成,预计~1000行代码)
+- 📝 Step 6.4: 光照系统 (设计完成,预计~500行代码)
+- 📝 Step 7: 玩家移动的八方向动画系统 (需求文档完成,预计~600-800行代码)
 - **总计**: ~10724行核心代码 + 测试代码
 
 ---
@@ -321,19 +322,17 @@ src/resources/
    - ApplyShadowsPatterns()
    - 地图美化
 
-**Step 6.4: 光照系统与8方向动画**（拆分为两个Phase）
-- **Step 6.4.1: 光照系统**（~500行，3天）📝 规划中
-  - 光照管理器 (LightingSystem)
-  - 光源管理 (LightSource)
-  - 颜色变换表 (LightTables)
-  - 光线追踪算法 (crawl_light)
-  - 渲染集成
-- **Step 6.4.2: 8方向玩家动画**（~400行，2天）⏸️ 待Phase 1完成
-  - Direction系统扩展
-  - DirectionalAnimation
-  - AnimationController扩展
-  - CL2加载器扩展
-  - 游戏集成
+**Step 6.4: 光照系统**（~500行，3天）📝 规划中
+1. 光照管理器 (LightingSystem)
+   - 光源管理 (LightSource)
+   - 颜色变换表 (LightTables)
+   - 光线追踪算法 (crawl_light)
+   - 渲染集成
+2. 玩家光源跟随
+   - 玩家站立和移动时更新光源位置
+   - 后续与 Step 7 的行走偏移对齐
+
+**说明：** 8方向玩家动画从 Step 6.4 拆出，改为 Step 7 独立完成。Step 6.4 只保留光照系统，避免把资源动画、移动状态机和光照调试混在同一个实现批次里。
 
 **练习任务：**
 - 实现等距投影可视化工具
@@ -376,7 +375,7 @@ src/resources/
 - ✅ 6种TileType解码器完整实现
   - Square解码器 (103行代码)
   - Triangle解码器 (341行代码) - Left/Right
-  - Trapezoid解码器 (282行代码) - Left/Right  
+  - Trapezoid解码器 (282行代码) - Left/Right
   - TransparentSquare解码器 (227行代码) - RLE编码
 - ✅ TileTextureManager纹理管理器 (351行代码)
 - ✅ DungeonCelSprite扩展 (191行代码)
@@ -412,66 +411,52 @@ texture_manager.rs       →     gendung.cpp:1235-1264
 
 ---
 
-#### Step 7: 怪物系统 Part 1 - 基础怪物
-**代码量：700-900行**
-**参考代码：**
-- `Source/monster.h` - 怪物结构定义
-- `Source/monster.cpp::InitMonster()` - 怪物初始化
-- `Source/monstdat.cpp` - 怪物数据
-
-**功能清单：**
-1. 怪物实体系统
-   - Monster结构（继承Entity）
-   - 怪物类型枚举（Zombie、Skeleton、Fallen等）
-   - 怪物属性（HP、伤害、护甲、速度）
-2. 怪物生成
-   - 在地图上随机生成怪物
-   - 怪物数量控制
-   - 不同层级的怪物类型
-3. 怪物精灵
-   - 怪物精灵加载
-   - 怪物动画（站立、行走）
-4. 简单AI（站立、巡逻）
-   - 随机漫步
-   - 简单状态机
-
-**练习任务：**
-- 创建3-5种不同的怪物类型
-- 实现怪物群组生成
-
----
-
-#### Step 7: 战斗系统 Part 1 - 近战战斗
+#### Step 7: 玩家移动的八方向动画系统
 **代码量：600-800行**
+**需求文档：** [Step 7 玩家移动的八方向动画系统需求文档](step-7-player-movement-8direction-animation-requirements.md)
+
 **参考代码：**
-- `Source/player.cpp::PlrAttack()` - 玩家攻击
-- `Source/monster.cpp::MonsterAttack()` - 怪物攻击
-- `Source/missiles.cpp` - 飞行物基础
+- `Source/player.cpp::StartWalkAnimation()` - 开始行走动画
+- `Source/player.cpp::HandleWalkMode()` - 设置方向、目标格和行走模式
+- `Source/player.cpp::DoWalk()` - 行走动画结束后提交玩家格子
+- `Source/player.cpp::NewPlrAnim()` - 按玩家动作和方向选择精灵序列
+- `Source/player.h::PlayerAnimationData::spritesForDirection()` - 8方向精灵列表
+- `Source/engine/render/scrollrt.cpp::GetOffsetForWalking()` - 行走过程中的像素偏移
+- `Source/engine/render/scrollrt.cpp::DrawPlayer()` - 使用当前动画帧和偏移绘制玩家
+- `Source/engine/animationinfo.cpp::getAnimationProgress()` - 动画进度计算
 
 **功能清单：**
-1. 玩家近战攻击
-   - 攻击动画
-   - 攻击判定（范围、方向）
-   - 伤害计算公式
-   - 击中反馈
-2. 怪物受击系统
-   - 受击动画
-   - HP显示
-   - 死亡动画
-   - 尸体处理
-3. 战斗数值系统
-   - 基础属性（力量、敏捷）
-   - 攻击力计算
-   - 护甲值和伤害减免
-   - 命中率计算
-4. 怪物反击
-   - 怪物攻击玩家
-   - 玩家受击
-   - 死亡处理
+1. 方向到动画序列的映射
+   - 明确 Diablo 原版方向顺序
+   - 为 `Direction` 增加动画索引和反向映射
+   - 保持输入方向、面向方向、动画方向一致
+2. 8方向玩家动画资源管理
+   - 将玩家 Idle/Walk CL2 帧按方向分组
+   - 支持按 `(AnimationState, Direction)` 获取当前帧
+   - 资源缺失时保留可观察 fallback
+3. 行走状态机
+   - `start_walk` 锁定起点、目标格和方向
+   - 行走中不瞬移到目标格
+   - 动画完成或进度完成后再提交 `tile_position`
+4. 行走偏移插值
+   - 参考原版 `MovingOffset[8]`
+   - 渲染时根据行走进度把玩家画在两个格子之间
+   - 相机跟随和光源跟随后续可复用同一进度
+5. 验证和诊断
+   - 单元测试覆盖方向映射、帧选择、状态切换和碰撞失败
+   - 手动验证覆盖 WASD/方向键的 8 个方向
+   - 调试输出必须可关闭
+
+**非目标：**
+- 不实现怪物系统、战斗系统、寻路队列或点击寻路
+- 不实现装备变体、攻击/施法/受击/死亡的完整8方向动画
+- 不改变 MPQ/CL2 基础解码格式
+- 不把骨骼动画、动画混合等现代化方案提前并入当前 step
 
 **练习任务：**
-- 实现暴击系统
-- 添加击退效果
+- 写一个只打印 `Direction -> animation_index -> Direction` 的最小测试
+- 做一个固定方向的 Walk 动画预览，确认每个方向只播放自己的帧段
+- 加一个手动调试开关，在屏幕或日志中显示当前方向、动画状态、帧号和行走进度
 
 ---
 
@@ -1973,9 +1958,7 @@ texture_manager.rs       →     gendung.cpp:1235-1264
 
 ---
 
-**最后更新：** 2025-12-03 (Step 6.4 设计完成)  
-**当前状态：** Step 6.3 完成,Step 6.4 设计文档和实施计划已完成  
-**下一步：** Step 6.4 - 光照系统与8方向玩家动画 (待进入EXECUTE阶段)  
+**最后更新：** 2026-05-16 (Step 7 玩家移动八方向动画需求文档完成)
+**当前状态：** Step 6.3 完成,Step 6.4 光照系统设计已完成,Step 7 玩家移动八方向动画进入文档先行阶段
+**下一步：** Step 7 - 完成原版调研、设计文档和测试文档后进入实现
 **下一里程碑：** Milestone 1 - 可玩原型（Step 12）
-
-

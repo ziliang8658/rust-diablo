@@ -76,7 +76,7 @@ fn is_line_clear(
     let y0 = y0.min(MAXDUNY - 1);
     let x1 = x1.min(MAXDUNX - 1);
     let y1 = y1.min(MAXDUNY - 1);
-    
+
     let mut x = x0 as i32;
     let mut y = y0 as i32;
     let dx = (x1 as i32 - x0 as i32).abs();

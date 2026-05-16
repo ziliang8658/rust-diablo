@@ -187,15 +187,15 @@ pub fn screen_to_tile(
 ) -> Point {
     let (columns, rows) = tiles_in_view(viewport_width, viewport_height);
     let lrow = rows; // Simplified: assume no panel coverage for now
-    
+
     // Center player tile on screen
     let mut current_tile = view_tile;
     shift_grid(&mut current_tile, -columns / 2, -lrow / 2);
-    
+
     // Adjust screen position by tile offset
     let mut adjusted_screen_x = screen_x + tile_offset_x;
     let mut adjusted_screen_y = screen_y + tile_offset_y;
-    
+
     // Align grid (similar to C++ alignment logic)
     if (columns % 2) == 0 && (lrow % 2) == 0 {
         adjusted_screen_y += TILE_HEIGHT / 2;
@@ -204,12 +204,12 @@ pub fn screen_to_tile(
     } else if (columns % 2) != 0 && (lrow % 2) == 0 {
         current_tile.y += 1;
     }
-    
+
     // Calculate tile offset from screen coordinates
     let tx = adjusted_screen_x / TILE_WIDTH;
     let ty = adjusted_screen_y / TILE_HEIGHT;
     shift_grid(&mut current_tile, tx, ty);
-    
+
     current_tile
 }
 
@@ -229,28 +229,24 @@ pub fn screen_to_tile(
 ///
 /// # Reference
 /// Original: Source/cursor.cpp::ShiftToDiamondGridAlignment() Line 757-775
-pub fn shift_to_diamond_grid_alignment(
-    screen_x: i32,
-    screen_y: i32,
-    tile: &mut Point,
-) -> bool {
+pub fn shift_to_diamond_grid_alignment(screen_x: i32, screen_y: i32, tile: &mut Point) -> bool {
     let px = screen_x % TILE_WIDTH;
     let py = screen_y % TILE_HEIGHT;
-    
+
     let flipy = py < (px / 2);
     if flipy {
         tile.y -= 1;
     }
-    
+
     let flipx = py >= TILE_HEIGHT - (px / 2);
     if flipx {
         tile.x += 1;
     }
-    
+
     // Clamp to valid bounds
     tile.x = tile.x.clamp(0, MAXDUNX - 1);
     tile.y = tile.y.clamp(0, MAXDUNY - 1);
-    
+
     // Calculate flipflag
     (flipy && flipx) || ((flipy || flipx) && px < TILE_WIDTH / 2)
 }
@@ -299,10 +295,10 @@ pub fn screen_to_tile_simple(
         0, // tile_offset_x
         0, // tile_offset_y
     );
-    
+
     // Apply diamond grid alignment
     shift_to_diamond_grid_alignment(screen_x, screen_y, &mut tile);
-    
+
     tile
 }
 
@@ -339,10 +335,7 @@ pub fn world_pixel_to_tile(world_pixel_x: i32, world_pixel_y: i32, tile_size: i3
     // Convert pixel coordinates to tile coordinates
     // For orthogonal world grid: tile = pixel / tile_size
     // This is the correct conversion for world coordinates (orthogonal grid, not isometric)
-    Point::new(
-        world_pixel_x / tile_size,
-        world_pixel_y / tile_size,
-    )
+    Point::new(world_pixel_x / tile_size, world_pixel_y / tile_size)
 }
 
 /// Convert world pixel coordinates to MicroTile coordinates (dPiece space)
@@ -636,11 +629,11 @@ mod tests {
     #[test]
     fn test_shift_grid() {
         let mut tile = Point::new(10, 10);
-        
+
         // Shift right (horizontal = 1)
         shift_grid(&mut tile, 1, 0);
         assert_eq!(tile.x, 11); // 10 + 0 + 1 = 11
-        assert_eq!(tile.y, 9);  // 10 + 0 - 1 = 9
+        assert_eq!(tile.y, 9); // 10 + 0 - 1 = 9
 
         // Reset and shift down (vertical = 1)
         tile = Point::new(10, 10);
@@ -674,7 +667,7 @@ mod tests {
             0, // tile_offset_x
             0, // tile_offset_y
         );
-        
+
         // The result should be close to view_tile (may vary due to grid alignment)
         assert!(tile.x >= 8 && tile.x <= 12);
         assert!(tile.y >= 8 && tile.y <= 12);
@@ -715,13 +708,13 @@ mod tests {
         let flipflag1 = shift_to_diamond_grid_alignment(0, 0, &mut tile);
         assert!(tile.x >= 0 && tile.x < MAXDUNX);
         assert!(tile.y >= 0 && tile.y < MAXDUNY);
-        
+
         // Test with px = 63, py = 31 (bottom-right of diamond)
         let mut tile = Point::new(5, 5);
         let flipflag2 = shift_to_diamond_grid_alignment(63, 31, &mut tile);
         assert!(tile.x >= 0 && tile.x < MAXDUNX);
         assert!(tile.y >= 0 && tile.y < MAXDUNY);
-        
+
         // flipflag should be boolean
         assert!(flipflag1 == true || flipflag1 == false);
         assert!(flipflag2 == true || flipflag2 == false);
@@ -744,7 +737,7 @@ mod tests {
             viewport_width,
             viewport_height,
         );
-        
+
         // The result should be valid tile coordinates
         assert!(tile.x >= 0 && tile.x < MAXDUNX);
         assert!(tile.y >= 0 && tile.y < MAXDUNY);
@@ -757,7 +750,7 @@ mod tests {
         // Test that converting screen -> tile -> screen gives reasonable results
         // Note: This is not a perfect roundtrip because screen_to_tile uses
         // approximate grid calculations, but it should be close
-        
+
         let view_tile = Point::new(10, 10);
         let viewport_width = 640;
         let viewport_height = 480;
@@ -778,12 +771,22 @@ mod tests {
                 viewport_width,
                 viewport_height,
             );
-            
+
             // Verify tile is in valid bounds
-            assert!(tile.x >= 0 && tile.x < MAXDUNX, 
-                "Tile x out of bounds: {} for screen ({}, {})", tile.x, screen_x, screen_y);
-            assert!(tile.y >= 0 && tile.y < MAXDUNY,
-                "Tile y out of bounds: {} for screen ({}, {})", tile.y, screen_x, screen_y);
+            assert!(
+                tile.x >= 0 && tile.x < MAXDUNX,
+                "Tile x out of bounds: {} for screen ({}, {})",
+                tile.x,
+                screen_x,
+                screen_y
+            );
+            assert!(
+                tile.y >= 0 && tile.y < MAXDUNY,
+                "Tile y out of bounds: {} for screen ({}, {})",
+                tile.y,
+                screen_x,
+                screen_y
+            );
         }
     }
 }

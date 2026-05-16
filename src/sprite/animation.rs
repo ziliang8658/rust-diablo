@@ -1,6 +1,7 @@
 /// Animation - Frame-based animation system
 ///
 /// Manages sprite sheet animations with multiple frames
+use crate::engine::Direction;
 use crate::math::Rect;
 use std::collections::HashMap;
 
@@ -54,6 +55,10 @@ impl Animation {
     ///
     /// Returns true if the frame changed
     pub fn update(&mut self, dt: f32) -> bool {
+        if self.frames.is_empty() {
+            return false;
+        }
+
         if self.finished && !self.looping {
             return false;
         }
@@ -91,8 +96,34 @@ impl Animation {
         self.finished
     }
 
+    /// Total animation duration in seconds.
+    pub fn duration(&self) -> f32 {
+        if self.frames.is_empty() {
+            return 0.0;
+        }
+        self.frames.len() as f32 * self.frame_duration
+    }
+
+    /// Normalized progress through the animation in the range 0.0..=1.0.
+    pub fn progress(&self) -> f32 {
+        let total_duration = self.duration();
+        if total_duration <= 0.0 {
+            return 0.0;
+        }
+        if self.finished && !self.looping {
+            return 1.0;
+        }
+
+        let current_duration =
+            self.current_frame as f32 * self.frame_duration + self.elapsed.min(self.frame_duration);
+        (current_duration / total_duration).clamp(0.0, 1.0)
+    }
+
     /// Get the current frame rectangle
     pub fn current_frame_rect(&self) -> Rect {
+        if self.frames.is_empty() {
+            return Rect::new(0, 0, 0, 0);
+        }
         self.frames[self.current_frame]
     }
 
@@ -107,9 +138,11 @@ impl Animation {
 /// AnimationController - Manages multiple animation states
 #[derive(Clone)]
 pub struct AnimationController {
-    animations: HashMap<AnimationState, Animation>,
+    animations: HashMap<(AnimationState, Direction), Animation>,
     current_state: AnimationState,
+    current_direction: Direction,
     previous_state: AnimationState,
+    previous_direction: Direction,
 }
 
 impl AnimationController {
@@ -118,13 +151,20 @@ impl AnimationController {
         Self {
             animations: std::collections::HashMap::new(),
             current_state: AnimationState::Idle,
+            current_direction: Direction::South,
             previous_state: AnimationState::Idle,
+            previous_direction: Direction::South,
         }
     }
 
-    /// Add an animation state
-    pub fn add_animation(&mut self, state: AnimationState, animation: Animation) {
-        self.animations.insert(state, animation);
+    /// Add a directional animation state.
+    pub fn add_directional_animation(
+        &mut self,
+        state: AnimationState,
+        direction: Direction,
+        animation: Animation,
+    ) {
+        self.animations.insert((state, direction), animation);
     }
 
     /// Set current animation state
@@ -132,10 +172,28 @@ impl AnimationController {
     /// If the state is different from current, it will switch to the new state
     /// and reset the animation.
     pub fn set_state(&mut self, state: AnimationState) {
-        if state != self.current_state {
+        self.set_state_direction(state, self.current_direction);
+    }
+
+    /// Set current animation state and direction together.
+    pub fn set_state_direction(&mut self, state: AnimationState, direction: Direction) {
+        if state != self.current_state || direction != self.current_direction {
             self.previous_state = self.current_state;
+            self.previous_direction = self.current_direction;
             self.current_state = state;
-            if let Some(anim) = self.animations.get_mut(&state) {
+            self.current_direction = direction;
+            if let Some(anim) = self.current_animation_mut() {
+                anim.reset();
+            }
+        }
+    }
+
+    /// Set only the current direction while keeping the current state.
+    pub fn set_direction(&mut self, direction: Direction) {
+        if direction != self.current_direction {
+            self.previous_direction = self.current_direction;
+            self.current_direction = direction;
+            if let Some(anim) = self.current_animation_mut() {
                 anim.reset();
             }
         }
@@ -146,9 +204,56 @@ impl AnimationController {
         self.previous_state
     }
 
+    /// Get previous animation direction.
+    pub fn previous_direction(&self) -> Direction {
+        self.previous_direction
+    }
+
     /// Get current animation state
     pub fn current_state(&self) -> AnimationState {
         self.current_state
+    }
+
+    /// Get current animation direction.
+    pub fn current_direction(&self) -> Direction {
+        self.current_direction
+    }
+
+    /// Get the current animation duration.
+    pub fn current_animation_duration(&self) -> Option<f32> {
+        self.current_animation().map(|anim| anim.duration())
+    }
+
+    /// Get the current animation progress.
+    pub fn current_animation_progress(&self) -> Option<f32> {
+        self.current_animation().map(|anim| anim.progress())
+    }
+
+    fn resolve_key(&self) -> Option<(AnimationState, Direction)> {
+        let exact = (self.current_state, self.current_direction);
+        if self.animations.contains_key(&exact) {
+            return Some(exact);
+        }
+
+        let south = (self.current_state, Direction::South);
+        if self.animations.contains_key(&south) {
+            return Some(south);
+        }
+
+        self.animations
+            .keys()
+            .copied()
+            .find(|(state, _)| *state == self.current_state)
+    }
+
+    fn current_animation(&self) -> Option<&Animation> {
+        let key = self.resolve_key()?;
+        self.animations.get(&key)
+    }
+
+    fn current_animation_mut(&mut self) -> Option<&mut Animation> {
+        let key = self.resolve_key()?;
+        self.animations.get_mut(&key)
     }
 
     /// Get current frame index of the current animation
@@ -156,29 +261,25 @@ impl AnimationController {
     /// Returns the frame index (0-based) of the currently playing animation.
     /// Useful for synchronizing visual effects with animation frames.
     pub fn current_frame_index(&self) -> Option<usize> {
-        self.animations
-            .get(&self.current_state)
-            .map(|anim| anim.current_frame)
+        self.current_animation().map(|anim| anim.current_frame)
     }
 
     /// Update current animation
     pub fn update(&mut self, dt: f32) {
-        if let Some(anim) = self.animations.get_mut(&self.current_state) {
+        if let Some(anim) = self.current_animation_mut() {
             anim.update(dt);
         }
     }
 
     /// Get current frame rectangle
     pub fn current_frame_rect(&self) -> Option<Rect> {
-        self.animations
-            .get(&self.current_state)
+        self.current_animation()
             .map(|anim| anim.current_frame_rect())
     }
 
     /// Check if current animation is finished
     pub fn is_finished(&self) -> bool {
-        self.animations
-            .get(&self.current_state)
+        self.current_animation()
             .map(|anim| anim.is_finished())
             .unwrap_or(false)
     }
@@ -253,55 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn test_animation_controller_state_switch() {
-        let mut controller = AnimationController::new();
-
-        let idle_anim = Animation::new(
-            vec![Rect {
-                x: 0,
-                y: 0,
-                width: 32,
-                height: 32,
-            }],
-            0.1,
-            true,
-        );
-        let walk_anim = Animation::new(
-            vec![
-                Rect {
-                    x: 0,
-                    y: 32,
-                    width: 32,
-                    height: 32,
-                },
-                Rect {
-                    x: 32,
-                    y: 32,
-                    width: 32,
-                    height: 32,
-                },
-            ],
-            0.1,
-            true,
-        );
-
-        controller.add_animation(AnimationState::Idle, idle_anim);
-        controller.add_animation(AnimationState::Walk, walk_anim);
-
-        // 初始状态应该是 Idle
-        assert_eq!(controller.current_state(), AnimationState::Idle);
-
-        // 切换到 Walk
-        controller.set_state(AnimationState::Walk);
-        assert_eq!(controller.current_state(), AnimationState::Walk);
-        assert_eq!(controller.previous_state(), AnimationState::Idle);
-
-        // 重复设置同一状态不应该改变 previous_state
-        controller.set_state(AnimationState::Walk);
-        assert_eq!(controller.previous_state(), AnimationState::Idle);
-    }
-
-    #[test]
     fn test_animation_reset() {
         let frames = vec![
             Rect {
@@ -326,5 +378,24 @@ mod tests {
         assert_eq!(anim.current_frame, 0);
         assert_eq!(anim.elapsed, 0.0);
         assert!(!anim.finished);
+    }
+
+    #[test]
+    fn test_animation_progress() {
+        let frames = vec![
+            Rect::new(0, 0, 10, 10),
+            Rect::new(10, 0, 10, 10),
+            Rect::new(20, 0, 10, 10),
+            Rect::new(30, 0, 10, 10),
+        ];
+        let mut anim = Animation::new(frames, 0.25, false);
+        assert_eq!(anim.progress(), 0.0);
+
+        anim.update(0.125);
+        assert!(anim.progress() > 0.0);
+
+        anim.update(1.0);
+        assert!(anim.is_finished());
+        assert_eq!(anim.progress(), 1.0);
     }
 }

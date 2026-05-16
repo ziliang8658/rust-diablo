@@ -197,8 +197,9 @@ impl SolData {
             }
         }
 
-        let mut sol_data = sol_data
-            .ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to load SOL file")))?;
+        let mut sol_data = sol_data.ok_or_else(|| {
+            last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to load SOL file"))
+        })?;
 
         // Apply fixes for known issues in original data
         match dungeon_type {

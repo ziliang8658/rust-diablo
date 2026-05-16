@@ -1,6 +1,34 @@
 /// Direction system for 8-directional movement
 ///
 /// Reference: Source/engine/direction.hpp
+use crate::math::Point;
+
+/// Diablo player animation order.
+///
+/// This matches `Source/player.cpp::WalkSettings` and
+/// `Source/engine/render/scrollrt.cpp::GetOffsetForWalking()`.
+pub const WALK_ANIMATION_ORDER: [Direction; 8] = [
+    Direction::South,
+    Direction::SouthWest,
+    Direction::West,
+    Direction::NorthWest,
+    Direction::North,
+    Direction::NorthEast,
+    Direction::East,
+    Direction::SouthEast,
+];
+
+/// Screen-space walking offsets used by the original renderer.
+pub const WALKING_RENDER_OFFSETS: [Point; 8] = [
+    Point { x: 0, y: 32 },
+    Point { x: -32, y: 16 },
+    Point { x: -64, y: 0 },
+    Point { x: -32, y: -16 },
+    Point { x: 0, y: -32 },
+    Point { x: 32, y: -16 },
+    Point { x: 64, y: 0 },
+    Point { x: 32, y: 16 },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
@@ -16,6 +44,82 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Get the fixed animation order used by Diablo player walk sheets.
+    pub const fn walk_animation_order() -> [Direction; 8] {
+        WALK_ANIMATION_ORDER
+    }
+
+    /// Convert this direction to the Diablo walk animation index.
+    ///
+    /// `Direction::None` does not represent a valid walk direction.
+    pub fn to_walk_animation_index(self) -> Option<usize> {
+        match self {
+            Direction::South => Some(0),
+            Direction::SouthWest => Some(1),
+            Direction::West => Some(2),
+            Direction::NorthWest => Some(3),
+            Direction::North => Some(4),
+            Direction::NorthEast => Some(5),
+            Direction::East => Some(6),
+            Direction::SouthEast => Some(7),
+            Direction::None => None,
+        }
+    }
+
+    /// Convert a Diablo walk animation index back into a direction.
+    pub fn from_walk_animation_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Direction::South),
+            1 => Some(Direction::SouthWest),
+            2 => Some(Direction::West),
+            3 => Some(Direction::NorthWest),
+            4 => Some(Direction::North),
+            5 => Some(Direction::NorthEast),
+            6 => Some(Direction::East),
+            7 => Some(Direction::SouthEast),
+            _ => None,
+        }
+    }
+
+    /// Return a stable lowercase suffix for texture IDs and debug output.
+    pub fn animation_suffix(self) -> &'static str {
+        match self {
+            Direction::None => "none",
+            Direction::North => "north",
+            Direction::NorthEast => "north_east",
+            Direction::East => "east",
+            Direction::SouthEast => "south_east",
+            Direction::South => "south",
+            Direction::SouthWest => "south_west",
+            Direction::West => "west",
+            Direction::NorthWest => "north_west",
+        }
+    }
+
+    /// Return the original walking offset for this direction, scaled by progress.
+    pub fn walking_render_offset(self, progress: f32) -> Point {
+        let Some(index) = self.to_walk_animation_index() else {
+            return Point::zero();
+        };
+
+        let progress = progress.clamp(0.0, 1.0);
+        let base = WALKING_RENDER_OFFSETS[index];
+        Point::new(
+            (base.x as f32 * progress).round() as i32,
+            (base.y as f32 * progress).round() as i32,
+        )
+    }
+
+    /// Return a simple 2D pixel offset for orthogonal previews.
+    pub fn walking_pixel_offset(self, progress: f32, tile_size: i32) -> Point {
+        let (dx, dy) = self.to_velocity();
+        let progress = progress.clamp(0.0, 1.0);
+        Point::new(
+            (dx * tile_size as f32 * progress).round() as i32,
+            (dy * tile_size as f32 * progress).round() as i32,
+        )
+    }
+
     /// 从速度向量创建方向
     ///
     /// # Arguments
@@ -117,23 +221,24 @@ impl Direction {
         )
     }
 
-    /// 转换为 tile 偏移量（整数）
+    /// 转换为 Diablo 等距 tile 偏移量（整数）
     ///
     /// # Returns
-    /// (dx, dy) 元组，表示在 tile 坐标系统中的偏移量
-    /// - dx: X 方向偏移（-1, 0, 或 1）
-    /// - dy: Y 方向偏移（-1, 0, 或 1）
+    /// (dx, dy) 元组，表示在 Diablo tile 坐标系统中的偏移量。
+    ///
+    /// 这里不能使用普通屏幕上下左右坐标。DevilutionX 的 `Direction`
+    /// 是等距地图方向，参考 `Source/engine/displacement.hpp::fromDirection()`.
     pub fn to_tile_offset(&self) -> (i32, i32) {
         match self {
             Direction::None => (0, 0),
-            Direction::North => (0, -1),
-            Direction::NorthEast => (1, -1),
-            Direction::East => (1, 0),
-            Direction::SouthEast => (1, 1),
-            Direction::South => (0, 1),
-            Direction::SouthWest => (-1, 1),
-            Direction::West => (-1, 0),
-            Direction::NorthWest => (-1, -1),
+            Direction::South => (1, 1),
+            Direction::SouthWest => (0, 1),
+            Direction::West => (-1, 1),
+            Direction::NorthWest => (-1, 0),
+            Direction::North => (-1, -1),
+            Direction::NorthEast => (0, -1),
+            Direction::East => (1, -1),
+            Direction::SouthEast => (1, 0),
         }
     }
 }
@@ -218,5 +323,54 @@ mod tests {
     #[test]
     fn test_default() {
         assert_eq!(Direction::default(), Direction::None);
+    }
+
+    #[test]
+    fn test_walk_animation_index_roundtrip() {
+        let order = Direction::walk_animation_order();
+        assert_eq!(order[0], Direction::South);
+        assert_eq!(order[4], Direction::North);
+        assert_eq!(Direction::None.to_walk_animation_index(), None);
+
+        for (index, direction) in order.iter().enumerate() {
+            assert_eq!(direction.to_walk_animation_index(), Some(index));
+            assert_eq!(
+                Direction::from_walk_animation_index(index),
+                Some(*direction)
+            );
+        }
+
+        assert_eq!(Direction::from_walk_animation_index(8), None);
+    }
+
+    #[test]
+    fn test_animation_suffixes() {
+        assert_eq!(Direction::South.animation_suffix(), "south");
+        assert_eq!(Direction::NorthEast.animation_suffix(), "north_east");
+        assert_eq!(Direction::None.animation_suffix(), "none");
+    }
+
+    #[test]
+    fn test_walking_render_offset_scaling() {
+        let full = Direction::East.walking_render_offset(1.0);
+        let half = Direction::East.walking_render_offset(0.5);
+        assert_eq!(full, Point::new(64, 0));
+        assert_eq!(half, Point::new(32, 0));
+
+        let none = Direction::None.walking_render_offset(0.75);
+        assert_eq!(none, Point::zero());
+    }
+
+    #[test]
+    fn test_diablo_tile_offsets() {
+        assert_eq!(Direction::South.to_tile_offset(), (1, 1));
+        assert_eq!(Direction::SouthWest.to_tile_offset(), (0, 1));
+        assert_eq!(Direction::West.to_tile_offset(), (-1, 1));
+        assert_eq!(Direction::NorthWest.to_tile_offset(), (-1, 0));
+        assert_eq!(Direction::North.to_tile_offset(), (-1, -1));
+        assert_eq!(Direction::NorthEast.to_tile_offset(), (0, -1));
+        assert_eq!(Direction::East.to_tile_offset(), (1, -1));
+        assert_eq!(Direction::SouthEast.to_tile_offset(), (1, 0));
+        assert_eq!(Direction::None.to_tile_offset(), (0, 0));
     }
 }

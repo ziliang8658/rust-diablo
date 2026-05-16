@@ -6,7 +6,6 @@ use crate::engine::Direction;
 use crate::math::{Point, Rect};
 use crate::renderer::Color;
 use crate::sprite::{Animation, AnimationController, AnimationState};
-use crate::world::collision::CollisionMap;
 
 /// Entity type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,20 +32,31 @@ pub struct Entity {
     pub animation: Option<AnimationController>,
 
     // Tile-based movement fields
-    pub direction: Direction, // 当前方向
-    pub walking: bool,         // 是否正在行走
+    pub direction: Direction,              // 当前方向 / 朝向
+    pub walking: bool,                     // 是否正在行走
     pub walk_direction: Option<Direction>, // 当前行走方向（如果正在行走）
+    pub walk_start_tile: Option<Point>,
+    pub walk_target_tile: Option<Point>,
+    pub walk_progress: f32,
+    pub walk_duration: f32,
 }
 
 impl Entity {
+    const DEFAULT_WALK_DURATION: f32 = 0.15;
+
     /// Create a new entity
-    /// 
+    ///
     /// # Arguments
     /// * `entity_type` - Type of entity
     /// * `tile_position` - Initial tile position in world coordinates
     /// * `size` - Entity size in pixels (for rendering)
     /// * `color` - Entity color
-    pub fn new(entity_type: EntityType, tile_position: Point, size: (u32, u32), color: Color) -> Self {
+    pub fn new(
+        entity_type: EntityType,
+        tile_position: Point,
+        size: (u32, u32),
+        color: Color,
+    ) -> Self {
         Self {
             entity_type,
             tile_position,
@@ -58,6 +68,10 @@ impl Entity {
             direction: Direction::None,
             walking: false,
             walk_direction: None,
+            walk_start_tile: None,
+            walk_target_tile: None,
+            walk_progress: 0.0,
+            walk_duration: 0.0,
         }
     }
 
@@ -97,6 +111,8 @@ impl Entity {
             Color::CYAN,
         );
 
+        entity.direction = Direction::South;
+
         // Enable sprite rendering
         entity.use_sprite = true;
         entity.sprite_id = Some("warrior_town".to_string()); // 匹配 resource_manager 中的加载
@@ -119,32 +135,34 @@ impl Entity {
         // Idle animation - Warrior standing (从 wmnas.cl2 加载)
         // 原版数据：idleFrames 通常为 8-10 帧（根据职业不同）
         // 实际配置：见 game.rs:372-377
-        let idle_anim = Animation::new(
-            vec![Rect::new(0, 0, 96, 96)], // 【占位符】：单帧，运行时会被替换
-            0.15,                          // Frame duration: 0.15s per frame
-            true,                          // Loop
-        );
-        anim_controller.add_animation(AnimationState::Idle, idle_anim);
+        for direction in Direction::walk_animation_order() {
+            let idle_anim = Animation::new(
+                vec![Rect::new(0, 0, 96, 96)], // 【占位符】：单帧，运行时会被替换
+                0.15,                          // Frame duration: 0.15s per frame
+                true,                          // Loop
+            );
+            anim_controller.add_directional_animation(AnimationState::Idle, direction, idle_anim);
 
-        // Walk animation - Warrior walking (从 wmnaw.cl2 加载)
-        // 原版数据：walkingFrames 为 8 帧（每个方向）
-        // 实际配置：见 game.rs:379-387
-        let walk_anim = Animation::new(
-            vec![Rect::new(0, 0, 96, 96)], // 【占位符】：单帧，运行时会被替换
-            0.1,                           // Frame duration: 0.1s = 10 FPS (walking speed)
-            true,                          // Loop
-        );
-        anim_controller.add_animation(AnimationState::Walk, walk_anim);
+            // Walk animation - Warrior walking (从 wmnaw.cl2 加载)
+            // 原版数据：walkingFrames 为 8 帧（每个方向）
+            // 实际配置：见 game.rs:379-387
+            let walk_anim = Animation::new(
+                vec![Rect::new(0, 0, 96, 96)], // 【占位符】：单帧，运行时会被替换
+                0.1,                           // Frame duration: 0.1s = 10 FPS (walking speed)
+                false,                         // Walk should finish after one step
+            );
+            anim_controller.add_directional_animation(AnimationState::Walk, direction, walk_anim);
+        }
 
-        // Set initial state to Idle
-        anim_controller.set_state(AnimationState::Idle);
+        // Set initial state to Idle facing south.
+        anim_controller.set_state_direction(AnimationState::Idle, Direction::South);
         entity.animation = Some(anim_controller);
 
         entity
     }
 
     /// Get the bounding rectangle for this entity in world pixel coordinates
-    /// 
+    ///
     /// Note: This converts tile position to pixel position for rendering.
     /// The actual position is stored as tile coordinates.
     pub fn bounds(&self, tile_size: u32) -> Rect {
@@ -154,10 +172,10 @@ impl Entity {
     }
 
     /// Update entity (tile-based movement system)
-    /// 
+    ///
     /// Similar to C++ DoWalk: checks if walking animation is complete,
     /// and if so, updates tile_position to the new tile.
-    /// 
+    ///
     /// # Arguments
     /// * `dt` - Delta time in seconds
     /// * `is_walkable_fn` - Optional function to check if a tile is walkable (world_x, world_y) -> bool
@@ -168,44 +186,54 @@ impl Entity {
         // Update animation
         if let Some(ref mut anim) = self.animation {
             anim.update(dt);
+            if self.walking {
+                if let Some(progress) = anim.current_animation_progress() {
+                    self.walk_progress = progress;
+                } else if self.walk_duration > 0.0 {
+                    self.walk_progress =
+                        (self.walk_progress + dt / self.walk_duration).clamp(0.0, 1.0);
+                }
+            }
         }
 
         // If walking, check if animation is complete
         if self.walking {
-            if let Some(ref anim) = self.animation {
-                // Check if animation reached last frame (like C++ AnimInfo.isLastFrame())
-                // For now, we'll use a simple time-based check
-                // TODO: Implement proper frame-based check when animation system supports it
-                if let Some(walk_dir) = self.walk_direction {
-                    // Calculate target tile
-                    let target_tile = self.calculate_target_tile(walk_dir);
-                    
-                    // Check if we can move to target tile (collision check)
-                    let can_move = if let Some(check_fn) = &is_walkable_fn {
-                        check_fn(target_tile.x, target_tile.y)
-                    } else {
-                        true // No collision check, allow movement
-                    };
+            if let Some(target_tile) = self.walk_target_tile {
+                let can_move = if let Some(check_fn) = &is_walkable_fn {
+                    check_fn(target_tile.x, target_tile.y)
+                } else {
+                    true
+                };
 
-                    if can_move {
-                        // For now, we'll move immediately when walking starts
-                        // TODO: Wait for animation to complete (like C++ DoWalk)
-                        // This requires proper animation frame tracking
-                        self.tile_position = target_tile;
-                        self.walking = false;
-                        self.walk_direction = None;
-                        
-                        // Switch back to idle animation
-                        if let Some(ref mut anim) = self.animation {
-                            anim.set_state(AnimationState::Idle);
-                        }
-                    } else {
-                        // Collision detected, stop walking
-                        self.walking = false;
-                        self.walk_direction = None;
-                        if let Some(ref mut anim) = self.animation {
-                            anim.set_state(AnimationState::Idle);
-                        }
+                let animation_done = self
+                    .animation
+                    .as_ref()
+                    .map(|anim| anim.is_finished())
+                    .unwrap_or(false);
+
+                if can_move && (animation_done || self.walk_progress >= 1.0) {
+                    self.tile_position = target_tile;
+                    self.walking = false;
+                    self.walk_direction = None;
+                    self.walk_start_tile = None;
+                    self.walk_target_tile = None;
+                    self.walk_progress = 0.0;
+                    self.walk_duration = 0.0;
+
+                    if let Some(ref mut anim) = self.animation {
+                        anim.set_state_direction(AnimationState::Idle, self.direction);
+                    }
+                } else if !can_move {
+                    // Collision detected, cancel the walk and return to idle.
+                    self.walking = false;
+                    self.walk_direction = None;
+                    self.walk_start_tile = None;
+                    self.walk_target_tile = None;
+                    self.walk_progress = 0.0;
+                    self.walk_duration = 0.0;
+
+                    if let Some(ref mut anim) = self.animation {
+                        anim.set_state_direction(AnimationState::Idle, self.direction);
                     }
                 }
             }
@@ -229,11 +257,11 @@ impl Entity {
     }
 
     /// Start walking in a direction (like C++ HandleWalkMode)
-    /// 
+    ///
     /// # Arguments
     /// * `direction` - Direction to walk
     /// * `is_walkable_fn` - Optional function to check if a tile is walkable (world_x, world_y) -> bool
-    /// 
+    ///
     /// # Returns
     /// `true` if walk started successfully, `false` if target tile is not walkable
     pub fn start_walk<F>(&mut self, direction: Direction, is_walkable_fn: Option<F>) -> bool
@@ -241,11 +269,12 @@ impl Entity {
         F: Fn(i32, i32) -> bool,
     {
         // Don't start new walk if already walking
-        if self.walking {
+        if self.walking || !direction.is_moving() {
             return false;
         }
 
         // Calculate target tile
+        let start_tile = self.tile_position;
         let target_tile = self.calculate_target_tile(direction);
 
         // Check if target tile is walkable
@@ -263,10 +292,18 @@ impl Entity {
         self.direction = direction;
         self.walking = true;
         self.walk_direction = Some(direction);
+        self.walk_start_tile = Some(start_tile);
+        self.walk_target_tile = Some(target_tile);
+        self.walk_progress = 0.0;
 
         // Switch to walk animation
         if let Some(ref mut anim) = self.animation {
-            anim.set_state(AnimationState::Walk);
+            anim.set_state_direction(AnimationState::Walk, direction);
+            self.walk_duration = anim
+                .current_animation_duration()
+                .unwrap_or(Self::DEFAULT_WALK_DURATION);
+        } else {
+            self.walk_duration = Self::DEFAULT_WALK_DURATION;
         }
 
         true
@@ -288,5 +325,129 @@ impl Entity {
     /// Set direction (for facing, not movement)
     pub fn set_direction(&mut self, direction: Direction) {
         self.direction = direction;
+        if !self.walking {
+            if let Some(ref mut anim) = self.animation {
+                anim.set_state_direction(AnimationState::Idle, direction);
+            }
+        }
+    }
+
+    /// Return the direction that should be used for rendering.
+    pub fn render_direction(&self) -> Direction {
+        if self.walking {
+            let direction = self.walk_direction.unwrap_or(self.direction);
+            if direction.is_moving() {
+                direction
+            } else {
+                Direction::South
+            }
+        } else {
+            if self.direction.is_moving() {
+                self.direction
+            } else {
+                Direction::South
+            }
+        }
+    }
+
+    /// Return the current walking progress in the range 0.0..=1.0.
+    pub fn walking_progress(&self) -> f32 {
+        if self.walking {
+            self.walk_progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Return the original Diablo-style isometric walking offset.
+    pub fn walking_render_offset(&self) -> Point {
+        if !self.walking {
+            return Point::zero();
+        }
+        let direction = self.render_direction();
+        direction.walking_render_offset(self.walking_progress())
+    }
+
+    /// Return a simple 2D walking offset for flat previews or town scenes.
+    pub fn walking_pixel_offset(&self, tile_size: i32) -> Point {
+        if !self.walking {
+            return Point::zero();
+        }
+        let direction = self.render_direction();
+        direction.walking_pixel_offset(self.walking_progress(), tile_size)
+    }
+
+    /// Cancel any in-progress walk and return to idle.
+    pub fn cancel_walk(&mut self) {
+        self.walking = false;
+        self.walk_direction = None;
+        self.walk_start_tile = None;
+        self.walk_target_tile = None;
+        self.walk_progress = 0.0;
+        self.walk_duration = 0.0;
+
+        if let Some(ref mut anim) = self.animation {
+            anim.set_state_direction(AnimationState::Idle, self.direction);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_start_walk_records_step_without_committing_tile() {
+        let mut player = Entity::create_player(Point::new(10, 10));
+
+        assert!(player.start_walk::<fn(i32, i32) -> bool>(Direction::East, None));
+
+        assert!(player.walking);
+        assert_eq!(player.direction, Direction::East);
+        assert_eq!(player.walk_direction, Some(Direction::East));
+        assert_eq!(player.walk_start_tile, Some(Point::new(10, 10)));
+        assert_eq!(player.walk_target_tile, Some(Point::new(11, 9)));
+        assert_eq!(player.tile_position, Point::new(10, 10));
+        assert_eq!(player.walking_progress(), 0.0);
+    }
+
+    #[test]
+    fn test_start_walk_collision_failure_does_not_change_state() {
+        let mut player = Entity::create_player(Point::new(10, 10));
+
+        let started = player.start_walk(Direction::East, Some(|_, _| false));
+
+        assert!(!started);
+        assert!(!player.walking);
+        assert_eq!(player.tile_position, Point::new(10, 10));
+        assert_eq!(player.walk_direction, None);
+        assert_eq!(player.walk_target_tile, None);
+    }
+
+    #[test]
+    fn test_update_commits_tile_after_walk_animation_finishes() {
+        let mut player = Entity::create_player(Point::new(10, 10));
+        assert!(player.start_walk::<fn(i32, i32) -> bool>(Direction::East, None));
+
+        player.update::<fn(i32, i32) -> bool>(0.2, None);
+
+        assert!(!player.walking);
+        assert_eq!(player.tile_position, Point::new(11, 9));
+        assert_eq!(player.direction, Direction::East);
+        assert_eq!(player.walk_direction, None);
+        assert_eq!(player.walk_target_tile, None);
+        assert_eq!(player.walking_progress(), 0.0);
+    }
+
+    #[test]
+    fn test_walking_render_offset_uses_progress() {
+        let mut player = Entity::create_player(Point::new(10, 10));
+        assert!(player.start_walk::<fn(i32, i32) -> bool>(Direction::East, None));
+
+        player.update::<fn(i32, i32) -> bool>(0.05, None);
+
+        assert!(player.walking);
+        assert_eq!(player.walking_render_offset(), Point::new(32, 0));
+        assert!((player.walking_progress() - 0.5).abs() < 0.001);
     }
 }

@@ -1,5 +1,3 @@
-
-
 /// Engine module - Low-level rendering and window management
 ///
 /// This module handles:
@@ -296,9 +294,48 @@ impl Engine {
                 0.0,
                 None,
                 false, // flip_h
-                true, // flip_v
+                true,  // flip_v
             )
             .map_err(|e| anyhow::anyhow!("Failed to copy texture: {}", e))?;
+
+        Ok(true)
+    }
+
+    /// Draw RGBA tile data through the dungeon tile texture cache.
+    ///
+    /// This keeps the same destination/flip behavior as `draw_rgba_texture`,
+    /// but avoids recreating and uploading the same micro-tile texture every
+    /// frame. The cache owns the SDL texture; we only borrow it for this copy.
+    pub fn draw_cached_rgba_texture(
+        &mut self,
+        cache_key: usize,
+        rgba_data: &[u8],
+        width: u32,
+        height: u32,
+        dst_rect: crate::math::Rect,
+    ) -> Result<bool> {
+        if rgba_data.len() != (width * height * 4) as usize {
+            return Err(anyhow::anyhow!(
+                "RGBA data size mismatch: expected {}, got {}",
+                width * height * 4,
+                rgba_data.len()
+            ));
+        }
+
+        let sdl_rect =
+            sdl2::rect::Rect::new(dst_rect.x, dst_rect.y, dst_rect.width, dst_rect.height);
+        let texture_ptr = {
+            let texture = self
+                .tile_texture_cache_mut()
+                .get_or_create_texture(cache_key, rgba_data, width, height)?;
+            texture as *const SdlTexture
+        };
+
+        unsafe {
+            self.canvas
+                .copy_ex(&*texture_ptr, None, sdl_rect, 0.0, None, false, true)
+                .map_err(|e| anyhow::anyhow!("Failed to copy cached texture: {}", e))?;
+        }
 
         Ok(true)
     }

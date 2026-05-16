@@ -12,8 +12,18 @@ use crate::resources::clx::{ClxFrame, ClxSprite};
 use anyhow::{Context, Result};
 
 /// CL2 Sprite (shares implementation with CLX after parsing frame headers)
+#[derive(Debug, Clone)]
 pub struct Cl2Sprite {
     pub frames: Vec<ClxFrame>,
+}
+
+/// Directional CL2 sheet used by player animations.
+///
+/// The outer vector stores one animation per direction. Each inner `Cl2Sprite`
+/// is a normal frame list for that direction.
+#[derive(Debug, Clone)]
+pub struct Cl2DirectionalSpriteSheet {
+    pub directions: Vec<Cl2Sprite>,
 }
 
 impl Cl2Sprite {
@@ -26,60 +36,37 @@ impl Cl2Sprite {
     /// # Returns
     /// Parsed CL2 sprite with decoded frames
     pub fn from_bytes(data: &[u8], frame_width: u16) -> Result<Self> {
+        if Self::is_single_list(data)? {
+            let frames = Self::parse_frame_list(data, frame_width)?;
+            Ok(Cl2Sprite { frames })
+        } else {
+            let offsets = Self::read_sheet_offsets(data)?;
+            let start = offsets[0];
+            let frames = Self::parse_frame_list(&data[start..], frame_width)?;
+            Ok(Cl2Sprite { frames })
+        }
+    }
+
+    fn parse_frame_list(data: &[u8], frame_width: u16) -> Result<Vec<ClxFrame>> {
         if data.len() < 8 {
             return Err(anyhow::anyhow!("CL2 file too small: {} bytes", data.len()));
         }
 
-        // Read number of frames (or group offset if this is a sheet)
-        let maybe_num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-
-        // Check if this is a single sprite list or a sprite sheet
-        let num_frames: u32;
-        let group_begin: usize;
-
-        // If it is a number of frames, then the last frame offset equals file size
-        let last_offset_pos = (maybe_num_frames * 4 + 4) as usize;
-        if last_offset_pos < data.len() {
-            let last_offset = u32::from_le_bytes([
-                data[last_offset_pos],
-                data[last_offset_pos + 1],
-                data[last_offset_pos + 2],
-                data[last_offset_pos + 3],
-            ]);
-
-            if last_offset == data.len() as u32 {
-                // Single sprite list
-                num_frames = maybe_num_frames;
-                group_begin = 0;
-            } else {
-                // Sprite sheet - for now, just load the first group
-                let first_group_offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                group_begin = first_group_offset as usize;
-                num_frames = u32::from_le_bytes([
-                    data[group_begin],
-                    data[group_begin + 1],
-                    data[group_begin + 2],
-                    data[group_begin + 3],
-                ]);
-            }
-        } else {
-            return Err(anyhow::anyhow!(
-                "CL2 header invalid: last offset position {} >= file size {}",
-                last_offset_pos,
-                data.len()
-            ));
-        }
+        // Read number of frames from the list header.
+        // For directional sheets we call this function on one group at a time.
+        let num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let group_begin = 0usize;
 
         if num_frames == 0 {
             return Err(anyhow::anyhow!("CL2 file has zero frames"));
         }
 
         // Parse each frame
-        let mut frames = Vec::with_capacity(num_frames as usize);
+        let mut frames = Vec::with_capacity(num_frames);
 
         for frame_idx in 0..num_frames {
-            let frame_offset_pos = group_begin + 4 + (frame_idx as usize * 4);
-            let next_offset_pos = group_begin + 4 + ((frame_idx + 1) as usize * 4);
+            let frame_offset_pos = group_begin + 4 + (frame_idx * 4);
+            let next_offset_pos = group_begin + 4 + ((frame_idx + 1) * 4);
 
             if next_offset_pos + 3 >= data.len() {
                 return Err(anyhow::anyhow!(
@@ -152,9 +139,138 @@ impl Cl2Sprite {
             });
         }
 
-        Ok(Cl2Sprite { frames })
+        Ok(frames)
     }
 
+    fn read_sheet_offsets(data: &[u8]) -> Result<Vec<usize>> {
+        if data.len() < 8 {
+            return Err(anyhow::anyhow!("CL2 file too small: {} bytes", data.len()));
+        }
+
+        let first_group_offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if first_group_offset < 8 || first_group_offset % 4 != 0 {
+            return Err(anyhow::anyhow!(
+                "CL2 sheet header invalid: first group offset {}",
+                first_group_offset
+            ));
+        }
+
+        // DevilutionX's Cl2ToClx treats the first DWORD as the byte offset of
+        // the first direction group. Since the table is 4-byte offsets with no
+        // trailing sentinel, first_group_offset / 4 is the direction count.
+        let group_count = first_group_offset / 4;
+        if group_count == 0 {
+            return Err(anyhow::anyhow!("CL2 sheet has zero direction groups"));
+        }
+
+        let mut offsets = Vec::with_capacity(group_count);
+        for index in 0..group_count {
+            let offset_pos = index * 4;
+            if offset_pos + 4 > data.len() {
+                return Err(anyhow::anyhow!(
+                    "CL2 sheet offset {} out of bounds for file size {}",
+                    index,
+                    data.len()
+                ));
+            }
+
+            let group_offset = u32::from_le_bytes([
+                data[offset_pos],
+                data[offset_pos + 1],
+                data[offset_pos + 2],
+                data[offset_pos + 3],
+            ]) as usize;
+
+            if group_offset >= data.len() {
+                return Err(anyhow::anyhow!(
+                    "CL2 sheet group {} offset {} out of bounds for file size {}",
+                    index,
+                    group_offset,
+                    data.len()
+                ));
+            }
+
+            offsets.push(group_offset);
+        }
+
+        Ok(offsets)
+    }
+
+    fn is_single_list(data: &[u8]) -> Result<bool> {
+        if data.len() < 8 {
+            return Err(anyhow::anyhow!("CL2 file too small: {} bytes", data.len()));
+        }
+
+        let maybe_num_frames = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let last_offset_pos = (maybe_num_frames as usize * 4) + 4;
+
+        if last_offset_pos + 4 > data.len() {
+            return Ok(false);
+        }
+
+        let last_offset = u32::from_le_bytes([
+            data[last_offset_pos],
+            data[last_offset_pos + 1],
+            data[last_offset_pos + 2],
+            data[last_offset_pos + 3],
+        ]);
+
+        Ok(last_offset == data.len() as u32)
+    }
+}
+
+impl Cl2DirectionalSpriteSheet {
+    /// Parse a directional CL2 sheet from bytes.
+    ///
+    /// If the file is a plain single-direction list, it is returned as a
+    /// single entry so callers can still use fallback behavior.
+    pub fn from_bytes(data: &[u8], frame_width: u16) -> Result<Self> {
+        if Cl2Sprite::is_single_list(data)? {
+            return Ok(Self {
+                directions: vec![Cl2Sprite {
+                    frames: Cl2Sprite::parse_frame_list(data, frame_width)?,
+                }],
+            });
+        }
+
+        let offsets = Cl2Sprite::read_sheet_offsets(data)?;
+        if offsets.is_empty() {
+            return Err(anyhow::anyhow!("CL2 sheet has no direction groups"));
+        }
+
+        let mut directions = Vec::with_capacity(offsets.len());
+        for index in 0..offsets.len() {
+            let start = offsets[index];
+
+            if start >= data.len() {
+                return Err(anyhow::anyhow!(
+                    "CL2 sheet direction {} invalid offset: {} of {}",
+                    index,
+                    start,
+                    data.len()
+                ));
+            }
+
+            let frames = Cl2Sprite::parse_frame_list(&data[start..], frame_width)
+                .with_context(|| format!("Failed to parse CL2 direction {}", index))?;
+            directions.push(Cl2Sprite { frames });
+        }
+
+        Ok(Self { directions })
+    }
+
+    /// Return the number of directions in this sheet.
+    pub fn direction_count(&self) -> usize {
+        self.directions.len()
+    }
+
+    /// Get a direction by index.
+    pub fn direction(&self, index: usize) -> Option<&Cl2Sprite> {
+        self.directions.get(index)
+    }
+}
+
+impl Cl2Sprite {
     /// Decode CL2 RLE compressed data and determine height
     ///
     /// CL2 RLE uses the same encoding as CLX.

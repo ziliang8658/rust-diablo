@@ -6,7 +6,7 @@
 /// # Architecture
 ///
 /// - Textures are cached by micro_index (unique tile identifier)
-/// - RGBA data is converted to SDL2's ABGR8888 format
+/// - RGBA data is uploaded using the same ABGR8888 path as Engine::draw_rgba_texture
 /// - Blend mode is set to support transparency
 ///
 /// # Reference
@@ -67,37 +67,19 @@ impl<'a> TextureCache<'a> {
     ) -> Result<&Texture<'a>> {
         // Check if texture already exists
         if !self.cache.contains_key(&micro_index) {
-            // Create new texture
+            // Create and upload exactly like Engine::draw_rgba_texture, then keep
+            // the texture around for subsequent frames.
             let mut texture = self
                 .texture_creator
-                .create_texture_streaming(PixelFormatEnum::ABGR8888, width, height)
+                .create_texture_static(PixelFormatEnum::ABGR8888, width, height)
                 .context("Failed to create SDL2 texture")?;
 
-            // Set blend mode to support transparency
-            // Reference: SDL2 uses BlendMode::Blend for standard alpha blending
-            texture.set_blend_mode(BlendMode::Blend);
-
-            // Upload pixel data to texture
             texture
-                .with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                    // Convert RGBA to ABGR (SDL2 format)
-                    // Reference: SDL2 ABGR8888 format layout
-                    for y in 0..height as usize {
-                        for x in 0..width as usize {
-                            let src_idx = (y * width as usize + x) * 4;
-                            let dst_idx = y * pitch + x * 4;
+                .update(None, rgba_data, (width * 4) as usize)
+                .context("Failed to update SDL2 texture")?;
 
-                            if src_idx + 3 < rgba_data.len() && dst_idx + 3 < buffer.len() {
-                                // RGBA -> ABGR conversion
-                                buffer[dst_idx + 0] = rgba_data[src_idx + 3]; // A
-                                buffer[dst_idx + 1] = rgba_data[src_idx + 2]; // B
-                                buffer[dst_idx + 2] = rgba_data[src_idx + 1]; // G
-                                buffer[dst_idx + 3] = rgba_data[src_idx + 0]; // R
-                            }
-                        }
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to lock texture for pixel upload: {}", e))?;
+            // Set blend mode to support transparency.
+            texture.set_blend_mode(BlendMode::Blend);
 
             // Cache the texture
             self.cache.insert(micro_index, texture);

@@ -1,5 +1,5 @@
 use crate::debug::RenderDebugFlags;
-use crate::engine::Engine;
+use crate::engine::{Direction, Engine};
 use crate::entity::Entity;
 /// World module - Game world and level system
 ///
@@ -15,7 +15,6 @@ use crate::sprite::AnimationState;
 use crate::tiles::{texture_manager::TileTextureManager, MinData, SolData, TilData};
 use anyhow::Result;
 use std::cell::RefCell;
-use sdl2::log;
 
 pub mod collision;
 pub mod dungeon_map;
@@ -66,6 +65,394 @@ impl RenderFocus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewportGeometry {
+    tile_shift: Point,
+    tile_offset: Point,
+    columns: i32,
+    rows: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WalkingViewportExpansion {
+    tile_shift: Point,
+    screen_offset: Point,
+    extra_columns: i32,
+    extra_rows: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WallContentScanPadding {
+    tile_shift: Point,
+    screen_x_shift: i32,
+    extra_columns: i32,
+}
+
+impl Default for WalkingViewportExpansion {
+    fn default() -> Self {
+        Self {
+            tile_shift: Point::zero(),
+            screen_offset: Point::zero(),
+            extra_columns: 0,
+            extra_rows: 0,
+        }
+    }
+}
+
+fn scaled_direction(direction: Direction, scale: i32) -> Point {
+    let (x, y) = direction.to_tile_offset();
+    Point::new(x * scale, y * scale)
+}
+
+fn calc_viewport_geometry(screen_width: i32, viewport_height: i32) -> ViewportGeometry {
+    // Port of DevilutionX CalcViewportGeometry() for the current Rust renderer:
+    // no zoom and no control-panel split yet, so the player sits at viewport center.
+    let player_position = Point::new(screen_width / 2, viewport_height / 2);
+    let tiles_to_top = (player_position.y + TILE_HEIGHT - 1) / TILE_HEIGHT;
+    let tiles_to_left = (player_position.x + TILE_WIDTH - 1) / TILE_WIDTH;
+
+    let mut start_position = Point::new(
+        player_position.x - tiles_to_left * TILE_WIDTH,
+        player_position.y - tiles_to_top * TILE_HEIGHT,
+    );
+    let mut tile_shift = scaled_direction(Direction::North, tiles_to_top)
+        + scaled_direction(Direction::West, tiles_to_left);
+
+    // The original render loop expects to start on the short row of the diamond.
+    // Missing this half-row alignment is enough to drop tall wall base tiles at edges.
+    if tiles_to_left * TILE_WIDTH >= player_position.x {
+        start_position.x += TILE_WIDTH / 2;
+        start_position.y -= TILE_HEIGHT / 2;
+        tile_shift = tile_shift + Point::from(Direction::NorthEast.to_tile_offset());
+    } else if tiles_to_top * TILE_HEIGHT < player_position.y {
+        start_position.y -= TILE_HEIGHT;
+        tile_shift = tile_shift + Point::from(Direction::North.to_tile_offset());
+    }
+
+    let tile_offset = Point::new(
+        start_position.x - TILE_WIDTH / 2,
+        start_position.y + TILE_HEIGHT / 2 - 1,
+    );
+    let render_start = Point::new(
+        start_position.x - TILE_WIDTH / 2,
+        start_position.y - TILE_HEIGHT / 2,
+    );
+    let rows = (viewport_height - render_start.y + TILE_HEIGHT / 2 - 1) / (TILE_HEIGHT / 2);
+    let columns = (screen_width - render_start.x + TILE_WIDTH - 1) / TILE_WIDTH;
+
+    ViewportGeometry {
+        tile_shift,
+        tile_offset,
+        columns,
+        rows,
+    }
+}
+
+fn walking_viewport_expansion(direction: Direction) -> WalkingViewportExpansion {
+    let mut expansion = WalkingViewportExpansion::default();
+
+    match direction {
+        Direction::North | Direction::NorthEast => {
+            expansion.tile_shift = Point::from(Direction::North.to_tile_offset());
+            expansion.screen_offset.y -= TILE_HEIGHT;
+            expansion.extra_rows = 2;
+            if direction == Direction::NorthEast {
+                expansion.extra_columns = 1;
+            }
+        }
+        Direction::South => {
+            expansion.extra_rows = 2;
+        }
+        Direction::East | Direction::West => {
+            expansion.extra_columns = 1;
+            if direction == Direction::West {
+                expansion.tile_shift = Point::from(Direction::West.to_tile_offset());
+                expansion.screen_offset.x -= TILE_WIDTH;
+            }
+        }
+        Direction::SouthEast | Direction::SouthWest => {
+            expansion.extra_columns = 1;
+            expansion.extra_rows = 1;
+            if direction == Direction::SouthWest {
+                expansion.tile_shift = Point::from(Direction::West.to_tile_offset());
+                expansion.screen_offset.x -= TILE_WIDTH;
+            }
+        }
+        Direction::NorthWest => {
+            expansion.tile_shift = Point::from(Direction::NorthWest.to_tile_offset());
+            expansion.screen_offset.x -= TILE_WIDTH / 2;
+            expansion.screen_offset.y -= TILE_HEIGHT / 2;
+            expansion.extra_columns = 1;
+            expansion.extra_rows = 1;
+        }
+        Direction::None => {}
+    }
+
+    expansion
+}
+
+fn wall_content_scan_padding() -> WallContentScanPadding {
+    // Keep a narrow content-only overscan while the Rust renderer still lacks
+    // the original object/entity grids and panel/zoom variants. Floors stay on
+    // the exact viewport geometry; tall wall content gets one safety column.
+    const WALL_EDGE_PADDING_COLUMNS: i32 = 1;
+
+    let west = Point::from(Direction::West.to_tile_offset());
+    WallContentScanPadding {
+        tile_shift: Point::new(
+            west.x * WALL_EDGE_PADDING_COLUMNS,
+            west.y * WALL_EDGE_PADDING_COLUMNS,
+        ),
+        screen_x_shift: -TILE_WIDTH * WALL_EDGE_PADDING_COLUMNS,
+        extra_columns: WALL_EDGE_PADDING_COLUMNS * 2,
+    }
+}
+
+fn wall_content_rows(rows: i32, micro_tile_len: usize) -> i32 {
+    // DevilutionX DrawTileContent() does `rows += MicroTileLen`. MicroTileLen is
+    // the number of micro blocks per piece, not the number of vertical pairs.
+    rows + micro_tile_len as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_viewport_geometry_matches_cpp_calc_viewport_geometry_640x480() {
+        assert_eq!(
+            calc_viewport_geometry(640, 480),
+            ViewportGeometry {
+                tile_shift: Point::new(-13, -4),
+                tile_offset: Point::new(0, -17),
+                columns: 10,
+                rows: 33,
+            }
+        );
+    }
+
+    #[test]
+    fn test_viewport_geometry_matches_cpp_calc_viewport_geometry_640x352() {
+        assert_eq!(
+            calc_viewport_geometry(640, 352),
+            ViewportGeometry {
+                tile_shift: Point::new(-11, -2),
+                tile_offset: Point::new(0, -17),
+                columns: 10,
+                rows: 25,
+            }
+        );
+    }
+
+    #[test]
+    fn test_walking_offset_matches_world_projection() {
+        for direction in Direction::walk_animation_order() {
+            let (dx, dy) = direction.to_tile_offset();
+            let (screen_x, screen_y) = world_to_screen(dx, dy);
+
+            assert_eq!(
+                direction.walking_render_offset(1.0),
+                Point::new(screen_x, screen_y),
+                "walking offset should match the rendered target tile for {:?}",
+                direction
+            );
+        }
+    }
+
+    #[test]
+    fn test_walking_viewport_expansion_matches_cpp_draw_areas() {
+        let cases = [
+            (Direction::None, Point::zero(), Point::zero(), 0, 0),
+            (
+                Direction::North,
+                Point::new(-1, -1),
+                Point::new(0, -TILE_HEIGHT),
+                0,
+                2,
+            ),
+            (
+                Direction::NorthEast,
+                Point::new(-1, -1),
+                Point::new(0, -TILE_HEIGHT),
+                1,
+                2,
+            ),
+            (Direction::East, Point::zero(), Point::zero(), 1, 0),
+            (Direction::SouthEast, Point::zero(), Point::zero(), 1, 1),
+            (Direction::South, Point::zero(), Point::zero(), 0, 2),
+            (
+                Direction::SouthWest,
+                Point::new(-1, 1),
+                Point::new(-TILE_WIDTH, 0),
+                1,
+                1,
+            ),
+            (
+                Direction::West,
+                Point::new(-1, 1),
+                Point::new(-TILE_WIDTH, 0),
+                1,
+                0,
+            ),
+            (
+                Direction::NorthWest,
+                Point::new(-1, 0),
+                Point::new(-TILE_WIDTH / 2, -TILE_HEIGHT / 2),
+                1,
+                1,
+            ),
+        ];
+
+        for (direction, tile_shift, screen_offset, extra_columns, extra_rows) in cases {
+            assert_eq!(
+                walking_viewport_expansion(direction),
+                WalkingViewportExpansion {
+                    tile_shift,
+                    screen_offset,
+                    extra_columns,
+                    extra_rows,
+                },
+                "walking expansion should match CalcFirstTilePosition/DrawGame for {direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wall_content_scan_pads_one_column_each_side() {
+        assert_eq!(
+            wall_content_scan_padding(),
+            WallContentScanPadding {
+                tile_shift: Point::new(-1, 1),
+                screen_x_shift: -TILE_WIDTH,
+                extra_columns: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn test_wall_content_rows_use_original_micro_tile_len() {
+        let base_rows = calc_viewport_geometry(640, 480).rows;
+
+        assert_eq!(wall_content_rows(base_rows, 16), base_rows + 16);
+        assert_eq!(wall_content_rows(base_rows, 10), base_rows + 10);
+    }
+
+    #[test]
+    fn test_entity_render_order_tile_uses_target_for_south_and_east_priority() {
+        let mut entity = Entity::new(
+            crate::entity::EntityType::Player,
+            Point::new(10, 10),
+            (32, 32),
+            Color::CYAN,
+        );
+
+        assert!(entity.start_walk::<fn(i32, i32) -> bool>(Direction::South, None));
+        assert_eq!(World::entity_render_order_tile(&entity), Point::new(11, 11));
+
+        entity.cancel_walk();
+        assert!(entity.start_walk::<fn(i32, i32) -> bool>(Direction::East, None));
+        assert_eq!(World::entity_render_order_tile(&entity), Point::new(11, 9));
+    }
+
+    #[test]
+    fn test_entity_scan_anchor_uses_source_tile_when_east_walk_sorts_on_target() {
+        let mut entity = Entity::new(
+            crate::entity::EntityType::Player,
+            Point::new(10, 10),
+            (32, 32),
+            Color::CYAN,
+        );
+
+        assert!(entity.start_walk::<fn(i32, i32) -> bool>(Direction::East, None));
+        entity.walk_progress = 0.5;
+
+        let scan_tile = World::entity_render_order_tile(&entity);
+        let scan_screen = Point::new(100, 200);
+        let anchor = World::entity_scan_anchor(&entity, scan_tile, scan_screen);
+        let walk_offset = entity.walking_render_offset();
+        let final_screen = Point::new(anchor.x + walk_offset.x, anchor.y + walk_offset.y);
+
+        assert_eq!(scan_tile, Point::new(11, 9));
+        assert_eq!(anchor, Point::new(36, 200));
+        assert_eq!(walk_offset, Point::new(32, 0));
+        assert_eq!(final_screen, Point::new(68, 200));
+    }
+
+    #[test]
+    fn test_entity_render_order_tile_keeps_source_for_north_and_west() {
+        let mut entity = Entity::new(
+            crate::entity::EntityType::Player,
+            Point::new(10, 10),
+            (32, 32),
+            Color::CYAN,
+        );
+
+        assert!(entity.start_walk::<fn(i32, i32) -> bool>(Direction::North, None));
+        assert_eq!(World::entity_render_order_tile(&entity), Point::new(10, 10));
+
+        entity.cancel_walk();
+        assert!(entity.start_walk::<fn(i32, i32) -> bool>(Direction::West, None));
+        assert_eq!(World::entity_render_order_tile(&entity), Point::new(10, 10));
+    }
+
+    #[test]
+    fn test_wall_content_predraw_matches_cpp_x_axis_gate() {
+        use crate::tiles::types::TileProperties;
+
+        let mut dungeon_map = DungeonMap::new();
+        let mut sol_data = SolData {
+            properties: vec![TileProperties::NONE; 3],
+        };
+        sol_data.properties[1] = TileProperties::SOLID;
+
+        let wall_piece_id = 1;
+        let floor_piece_id = 2;
+        let dpiece_x = 20;
+        let dpiece_y = 20;
+
+        dungeon_map.d_piece[dpiece_x][dpiece_y] = wall_piece_id;
+        dungeon_map.d_piece[dpiece_x + 1][dpiece_y] = wall_piece_id;
+        dungeon_map.d_piece[dpiece_x][dpiece_y - 1] = floor_piece_id;
+        dungeon_map.d_piece[dpiece_x + 1][dpiece_y - 1] = floor_piece_id;
+
+        assert!(
+            World::should_predraw_east_wall_content(
+                Some(&sol_data),
+                &dungeon_map,
+                dpiece_x as i32,
+                dpiece_y as i32,
+                576,
+                640
+            ),
+            "x-axis walls with walkable space behind them should pre-draw the east tile"
+        );
+        assert!(
+            !World::should_predraw_east_wall_content(
+                Some(&sol_data),
+                &dungeon_map,
+                dpiece_x as i32,
+                dpiece_y as i32,
+                577,
+                640
+            ),
+            "the pre-draw should not run when the east tile is fully outside the viewport"
+        );
+
+        sol_data.properties[floor_piece_id as usize] = TileProperties::SOLID;
+        assert!(
+            !World::should_predraw_east_wall_content(
+                Some(&sol_data),
+                &dungeon_map,
+                dpiece_x as i32,
+                dpiece_y as i32,
+                576,
+                640
+            ),
+            "the pre-draw is only for walls with walkable space behind them"
+        );
+    }
+}
+
 #[derive(Default)]
 struct RenderScratch {
     luminance: Vec<u8>,
@@ -101,6 +488,7 @@ pub struct World {
 
     // Render debug flags (for controlling rendering phases)
     pub render_debug: RenderDebugFlags,
+    require_entity_textures: bool,
     render_scratch: RefCell<RenderScratch>,
 }
 
@@ -130,7 +518,7 @@ pub fn screen_to_world(screen_x: i32, screen_y: i32) -> (i32, i32) {
 
 impl World {
     /// Create a new world
-    /// 
+    ///
     /// # Arguments
     /// * `width` - World width in tiles
     /// * `height` - World height in tiles
@@ -168,8 +556,14 @@ impl World {
             dungeon_map: None,
             lighting,
             render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
+            require_entity_textures: false,
             render_scratch: RefCell::new(RenderScratch::default()),
         }
+    }
+
+    /// Require sprite entities to draw real textures instead of debug rectangles.
+    pub fn require_entity_textures(&mut self) {
+        self.require_entity_textures = true;
     }
 
     /// Add an entity to the world
@@ -193,20 +587,23 @@ impl World {
         // Extract dungeon_map reference before the mutable borrow to avoid borrow checker issues
         // Simplified: only check if position is within bounds
         use crate::engine::isometric::BORDER_SIZE;
-        
+
         // Get dungeon_map reference before borrowing entities mutably
         let dungeon_map_opt = self.dungeon_map.as_ref();
-        
+
         for entity in &mut self.entities {
             if let Some(dungeon_map) = dungeon_map_opt {
                 // Create a closure that checks bounds using dungeon_map
                 // Capture dungeon_map by reference (it's already a reference, so this is fine)
                 let map = dungeon_map;
-                entity.update(dt, Some(move |x, y| {
-                    let dpiece_x = x + BORDER_SIZE;
-                    let dpiece_y = y + BORDER_SIZE;
-                    map.in_bounds(dpiece_x, dpiece_y)
-                }));
+                entity.update(
+                    dt,
+                    Some(move |x, y| {
+                        let dpiece_x = x + BORDER_SIZE;
+                        let dpiece_y = y + BORDER_SIZE;
+                        map.in_bounds(dpiece_x, dpiece_y)
+                    }),
+                );
             } else {
                 // Type annotation needed for None
                 entity.update::<fn(i32, i32) -> bool>(dt, None);
@@ -216,7 +613,7 @@ impl World {
         // Step 6.4.1: Update lighting system
         // Convert collision map to block map for lighting
         let block_map = self.collision_map.to_block_map();
-        
+
         // Update player light source position
         // Find player entity (assuming first entity is player)
         if let Some(player) = self.entities.get(0) {
@@ -225,11 +622,15 @@ impl World {
             use crate::engine::isometric::BORDER_SIZE;
             let micro_x = (player.tile_position.x + BORDER_SIZE) as usize;
             let micro_y = (player.tile_position.y + BORDER_SIZE) as usize;
-            
+
             // Check if player light source exists, if not create it
             let player_light_id = 1; // Use ID 1 for player light
-            let has_player_light = self.lighting.light_sources.iter().any(|s| s.id == player_light_id);
-            
+            let has_player_light = self
+                .lighting
+                .light_sources
+                .iter()
+                .any(|s| s.id == player_light_id);
+
             if !has_player_light {
                 // Create player light source
                 use crate::lighting::{LightSource, LightType};
@@ -243,10 +644,11 @@ impl World {
                 self.lighting.add_light(player_light);
             } else {
                 // Update player light position
-                self.lighting.update_light_position(player_light_id, (micro_x, micro_y));
+                self.lighting
+                    .update_light_position(player_light_id, (micro_x, micro_y));
             }
         }
-        
+
         // Update lighting system (calculate light propagation)
         self.lighting.update(&block_map);
     }
@@ -318,9 +720,7 @@ impl World {
     /// C++ TileHasAny/IsFloor: Source/engine/render/scrollrt.cpp Line 114-117
     /// C++ uses dPiece coordinates for TileHasAny, but player position is in world coordinates
     pub fn is_tile_walkable(&self, world_x: i32, world_y: i32) -> bool {
-        use crate::engine::isometric::BORDER_SIZE;
-        
-        if world_x <0 || world_y <0 {
+        if world_x < 0 || world_y < 0 {
             return false;
         }
 
@@ -334,8 +734,11 @@ impl World {
     /// Render the world
     pub fn render(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
         self.render_with_texture_manager(engine, camera)?;
-        // Draw entities (common for both rendering modes)
-        self.render_entities(engine, camera)?;
+        // In isometric dungeon mode with the wall layer enabled, entities are drawn
+        // inside the DrawTileContent-style tile scan so foreground walls can cover them.
+        if self.dungeon_map.is_none() || !self.render_debug.render_walls {
+            self.render_entities(engine, camera)?;
+        }
 
         Ok(())
     }
@@ -344,106 +747,180 @@ impl World {
     fn render_entities(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
         // Check if we're in isometric rendering mode (dungeon_map exists)
         let is_isometric = self.dungeon_map.is_some();
-        
+
         // Get player position for isometric rendering (if available)
         let player_tile_pos = if is_isometric {
-            self.entities.first().map(|p| (p.tile_position.x, p.tile_position.y))
+            self.entities
+                .first()
+                .map(|p| (p.tile_position.x, p.tile_position.y))
         } else {
             None
         };
-        
-        // Calculate screen center for isometric rendering
-        let screen_center_x = camera.viewport_width as i32 / 2;
-        let screen_center_y = camera.viewport_height as i32 / 2;
-        
-        for entity in &self.entities {
-            let screen_pos = if is_isometric {
-                // Isometric rendering mode: use isometric projection
-                if let Some((player_x, player_y)) = player_tile_pos {
-                    // Calculate relative position from player
-                    let delta_x = entity.tile_position.x - player_x;
-                    let delta_y = entity.tile_position.y - player_y;
-                    
-                    // Convert to screen coordinates using isometric projection
-                    // Reference: Source/engine/displacement.hpp::worldToScreen()
-                    use crate::engine::isometric::world_to_screen;
-                    let (screen_delta_x, screen_delta_y) = world_to_screen(delta_x, delta_y);
-                    
-                    // Player is at screen center, other entities are offset from center
-                    Point::new(
-                        screen_center_x + screen_delta_x,
-                        screen_center_y + screen_delta_y,
-                    )
-                } else {
-                    // No player, use entity position directly
-                    let (screen_x, screen_y) = crate::engine::isometric::world_to_screen(
-                        entity.tile_position.x,
-                        entity.tile_position.y,
-                    );
-                    Point::new(screen_x, screen_y)
-                }
-            } else {
-                // 2D rendering mode: use camera world_to_screen
-                let entity_world_pixel = Point::new(
-                    entity.tile_position.x * self.tile_size as i32,
-                    entity.tile_position.y * self.tile_size as i32,
-                );
-                camera.world_to_screen(entity_world_pixel)
-            };
-            
-            let dst_rect = Rect::from_center(screen_pos, entity.size.0, entity.size.1);
 
-            if entity.use_sprite {
-                // Render sprite if available
-                if let Some(ref base_sprite_id) = entity.sprite_id {
-                    // Get animation state and frame index
-                    let (anim_state, frame_index) = if let Some(ref anim) = entity.animation {
-                        let state = anim.current_state();
-                        let frame = anim.current_frame_index().unwrap_or(0);
-                        (Some(state), frame)
-                    } else {
-                        (None, 0)
+        for (entity_index, entity) in self.entities.iter().enumerate() {
+            self.render_entity(
+                engine,
+                camera,
+                entity_index,
+                entity,
+                is_isometric,
+                player_tile_pos,
+                None,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn render_entity(
+        &self,
+        engine: &mut Engine,
+        camera: &Camera,
+        entity_index: usize,
+        entity: &Entity,
+        is_isometric: bool,
+        player_tile_pos: Option<(i32, i32)>,
+        isometric_scan_anchor: Option<Point>,
+    ) -> Result<()> {
+        let render_offset = if is_isometric {
+            if isometric_scan_anchor.is_some() {
+                entity.walking_render_offset()
+            } else if entity_index == 0 {
+                Point::zero()
+            } else {
+                entity.walking_render_offset()
+            }
+        } else {
+            entity.walking_pixel_offset(self.tile_size as i32)
+        };
+
+        let screen_pos = if let Some(anchor) = isometric_scan_anchor {
+            Point::new(anchor.x + render_offset.x, anchor.y + render_offset.y)
+        } else if is_isometric {
+            // Isometric rendering mode: use isometric projection
+            if let Some((player_x, player_y)) = player_tile_pos {
+                // Calculate relative position from player
+                let delta_x = entity.tile_position.x - player_x;
+                let delta_y = entity.tile_position.y - player_y;
+
+                // Convert to screen coordinates using isometric projection
+                // Reference: Source/engine/displacement.hpp::worldToScreen()
+                let (screen_delta_x, screen_delta_y) = world_to_screen(delta_x, delta_y);
+
+                // Player is at screen center, other entities are offset from center
+                Point::new(
+                    camera.viewport_width as i32 / 2 + screen_delta_x + render_offset.x,
+                    camera.viewport_height as i32 / 2 + screen_delta_y + render_offset.y,
+                )
+            } else {
+                // No player, use entity position directly
+                let (screen_x, screen_y) =
+                    world_to_screen(entity.tile_position.x, entity.tile_position.y);
+                Point::new(screen_x + render_offset.x, screen_y + render_offset.y)
+            }
+        } else {
+            // 2D rendering mode: use camera world_to_screen
+            let entity_world_pixel = Point::new(
+                entity.tile_position.x * self.tile_size as i32,
+                entity.tile_position.y * self.tile_size as i32,
+            );
+            let mut screen_pos = camera.world_to_screen(entity_world_pixel);
+            screen_pos.x += render_offset.x;
+            screen_pos.y += render_offset.y;
+            screen_pos
+        };
+
+        let dst_rect = Rect::from_center(screen_pos, entity.size.0, entity.size.1);
+
+        if entity.use_sprite {
+            // Render sprite if available
+            if let Some(ref base_sprite_id) = entity.sprite_id {
+                // Get animation state and frame index
+                let (anim_state, frame_index) = if let Some(ref anim) = entity.animation {
+                    let state = anim.current_state();
+                    let frame = anim.current_frame_index().unwrap_or(0);
+                    (Some(state), frame)
+                } else {
+                    (None, 0)
+                };
+                let direction = entity.render_direction();
+
+                // For CL2/CLX sprites, construct texture ID with animation state
+                // Format: "{base}_{state}_{direction}_{frame}"
+                // e.g. "warrior_idle_south_0", "warrior_walk_north_east_3"
+                let mut texture_found = false;
+
+                if let Some(state) = anim_state {
+                    let state_name = match state {
+                        AnimationState::Idle => "idle",
+                        AnimationState::Walk => "walk",
+                        AnimationState::Attack => "attack",
+                        AnimationState::Hit => "hit",
+                        AnimationState::Death => "death",
+                        AnimationState::Cast => "cast",
                     };
 
-                    // For CL2/CLX sprites, construct texture ID with animation state
-                    // Format: "{base}_{state}_{frame}" e.g. "warrior_idle_0", "warrior_walk_3"
-                    let mut texture_found = false;
+                    let directional_texture_id = format!(
+                        "{}_{}_{}_{}",
+                        base_sprite_id,
+                        state_name,
+                        direction.animation_suffix(),
+                        frame_index
+                    );
 
-                    if let Some(state) = anim_state {
-                        let state_name = match state {
-                            AnimationState::Idle => "idle",
-                            AnimationState::Walk => "walk",
-                            AnimationState::Attack => "attack",
-                            AnimationState::Hit => "hit",
-                            AnimationState::Death => "death",
-                            AnimationState::Cast => "cast",
-                        };
-
-                        let texture_id =
+                    if engine.draw_texture_by_id(&directional_texture_id, None, dst_rect)? {
+                        texture_found = true;
+                    } else {
+                        let legacy_texture_id =
                             format!("{}_{}_{}", base_sprite_id, state_name, frame_index);
-
-                        if engine.texture_manager().contains(&texture_id) {
-                            if engine.draw_texture_by_id(&texture_id, None, dst_rect)? {
-                                texture_found = true;
-                            }
+                        if engine.draw_texture_by_id(&legacy_texture_id, None, dst_rect)? {
+                            texture_found = true;
                         }
                     }
+                }
 
-                    // Fallback: Try traditional sprite sheet with src_rect
-                    if !texture_found {
-                        let src_rect = entity
-                            .animation
-                            .as_ref()
-                            .and_then(|anim| anim.current_frame_rect());
+                // Fallback: Try traditional sprite sheet with src_rect
+                if !texture_found {
+                    let src_rect = entity
+                        .animation
+                        .as_ref()
+                        .and_then(|anim| anim.current_frame_rect());
 
-                        if !engine.draw_texture_by_id(base_sprite_id, src_rect, dst_rect)? {
-                            // Final fallback: colored rectangle
+                    if !engine.draw_texture_by_id(base_sprite_id, src_rect, dst_rect)? {
+                        if self.require_entity_textures {
+                            anyhow::bail!(
+                                "Missing entity texture '{}' for {:?} at tile ({}, {})",
+                                base_sprite_id,
+                                entity.entity_type,
+                                entity.tile_position.x,
+                                entity.tile_position.y
+                            );
+                        } else {
+                            // Final fallback for debug-only entities without loaded art.
                             engine.draw_rect(dst_rect, entity.color)?;
                         }
                     }
+                }
+            } else {
+                if self.require_entity_textures {
+                    anyhow::bail!(
+                        "Sprite entity {:?} has no sprite_id at tile ({}, {})",
+                        entity.entity_type,
+                        entity.tile_position.x,
+                        entity.tile_position.y
+                    );
                 } else {
                     engine.draw_rect(dst_rect, entity.color)?;
                 }
+            }
+        } else {
+            if self.require_entity_textures {
+                anyhow::bail!(
+                    "Sprite rendering disabled for {:?} at tile ({}, {})",
+                    entity.entity_type,
+                    entity.tile_position.x,
+                    entity.tile_position.y
+                );
             } else {
                 // Render as colored rectangle
                 engine.draw_rect(dst_rect, entity.color)?;
@@ -451,6 +928,79 @@ impl World {
         }
 
         Ok(())
+    }
+
+    fn entity_render_order_tile(entity: &Entity) -> Point {
+        if entity.walking {
+            let direction = entity.render_direction();
+            if matches!(
+                direction,
+                Direction::South | Direction::SouthWest | Direction::SouthEast | Direction::East
+            ) {
+                return entity.walk_target_tile.unwrap_or(entity.tile_position);
+            }
+        }
+
+        entity.tile_position
+    }
+
+    fn entity_scan_anchor(entity: &Entity, scan_tile: Point, scan_screen: Point) -> Point {
+        let delta_x = entity.tile_position.x - scan_tile.x;
+        let delta_y = entity.tile_position.y - scan_tile.y;
+        let (screen_delta_x, screen_delta_y) = world_to_screen(delta_x, delta_y);
+
+        Point::new(
+            scan_screen.x + screen_delta_x,
+            scan_screen.y + screen_delta_y,
+        )
+    }
+
+    fn render_entities_at_dpiece(
+        &self,
+        engine: &mut Engine,
+        camera: &Camera,
+        dpiece_x: i32,
+        dpiece_y: i32,
+        screen_x: i32,
+        screen_y: i32,
+        border_size: i32,
+    ) -> Result<()> {
+        if !self.render_debug.render_entities {
+            return Ok(());
+        }
+
+        let tile_position = Point::new(dpiece_x - border_size, dpiece_y - border_size);
+        let player_tile_pos = self
+            .entities
+            .first()
+            .map(|player| (player.tile_position.x, player.tile_position.y));
+
+        for (entity_index, entity) in self.entities.iter().enumerate() {
+            if Self::entity_render_order_tile(entity) == tile_position {
+                let scan_anchor =
+                    Self::entity_scan_anchor(entity, tile_position, Point::new(screen_x, screen_y));
+                self.render_entity(
+                    engine,
+                    camera,
+                    entity_index,
+                    entity,
+                    true,
+                    player_tile_pos,
+                    Some(scan_anchor),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn tile_texture_cache_key(
+        level_piece_id: usize,
+        block_index: usize,
+        kind: usize,
+        stylized: bool,
+    ) -> usize {
+        (((level_piece_id * 32) + block_index) * 4) + (kind * 2) + usize::from(stylized)
     }
 
     fn is_floor(sol: Option<&SolData>, piece_id: usize) -> bool {
@@ -462,21 +1012,113 @@ impl World {
             .unwrap_or(true)
     }
 
+    fn is_wall(
+        sol: Option<&SolData>,
+        dungeon_map: &DungeonMap,
+        dpiece_x: i32,
+        dpiece_y: i32,
+    ) -> bool {
+        if !dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+            return false;
+        }
+
+        let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
+        !Self::is_floor(sol, level_piece_id)
+    }
+
+    fn is_tile_not_solid(
+        sol: Option<&SolData>,
+        dungeon_map: &DungeonMap,
+        dpiece_x: i32,
+        dpiece_y: i32,
+    ) -> bool {
+        if !dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+            return false;
+        }
+
+        let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
+        sol.and_then(|sol| sol.get(level_piece_id))
+            .map(|props| !props.contains(crate::tiles::types::TileProperties::SOLID))
+            .unwrap_or(true)
+    }
+
+    fn should_predraw_east_wall_content(
+        sol: Option<&SolData>,
+        dungeon_map: &DungeonMap,
+        dpiece_x: i32,
+        dpiece_y: i32,
+        screen_x: i32,
+        screen_width: i32,
+    ) -> bool {
+        if dpiece_x + 1 >= MAXDUNX as i32 || dpiece_y <= 0 || screen_x + TILE_WIDTH > screen_width {
+            return false;
+        }
+
+        let wall_axis_aligned = Self::is_wall(sol, dungeon_map, dpiece_x, dpiece_y)
+            && (Self::is_wall(sol, dungeon_map, dpiece_x + 1, dpiece_y)
+                || (dpiece_x > 0 && Self::is_wall(sol, dungeon_map, dpiece_x - 1, dpiece_y)));
+        let has_walkable_area_behind =
+            Self::is_tile_not_solid(sol, dungeon_map, dpiece_x + 1, dpiece_y - 1)
+                && Self::is_tile_not_solid(sol, dungeon_map, dpiece_x, dpiece_y - 1);
+
+        wall_axis_aligned && has_walkable_area_behind
+    }
+
+    fn draw_tile_content_at(
+        &self,
+        engine: &mut Engine,
+        camera: &Camera,
+        texture_mgr: &RefCell<TileTextureManager>,
+        dungeon_map: &DungeonMap,
+        sol_data: Option<&SolData>,
+        dpiece_x: i32,
+        dpiece_y: i32,
+        screen_x: i32,
+        screen_y: i32,
+        border_size: i32,
+        log_render_focus: bool,
+    ) -> Result<()> {
+        let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
+        let is_floor = Self::is_floor(sol_data, level_piece_id);
+
+        if log_render_focus {
+            println!(
+                "  - phase=cell dpiece=({}, {}) piece_id={}",
+                dpiece_x, dpiece_y, level_piece_id
+            );
+        }
+
+        self.draw_cell_at(
+            engine,
+            texture_mgr,
+            level_piece_id,
+            screen_x,
+            screen_y,
+            is_floor,
+            dpiece_x,
+            dpiece_y,
+        )?;
+        self.render_entities_at_dpiece(
+            engine,
+            camera,
+            dpiece_x,
+            dpiece_y,
+            screen_x,
+            screen_y,
+            border_size,
+        )
+    }
+
     /// Render using TileTextureManager with proper tile decoding (Step 6.2)
     ///
     /// # Reference
     fn render_with_texture_manager(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
-        use std::io::Write;
-
-
-
         let texture_mgr_cell = self.texture_manager.as_ref().unwrap();
         let dungeon_map = match self.dungeon_map.as_ref() {
             Some(dm) => dm,
             None => return Ok(()), // No map data, skip rendering
         };
         let sol_data = self.sol_data.as_ref();
-
 
         let screen_width = camera.viewport_width as i32;
         let viewport_height = camera.viewport_height as i32;
@@ -487,7 +1129,7 @@ impl World {
 
         use crate::engine::isometric::BORDER_SIZE;
         use crate::math::Point;
-        
+
         // ViewPosition is in world coordinates (like C++ ViewPosition)
         // Reference: Source/engine/render/scrollrt.cpp::DrawView() Line 1364
         // DrawView(out, ViewPosition) where ViewPosition is world tile coordinates
@@ -497,7 +1139,7 @@ impl World {
             (player.tile_position.x, player.tile_position.y)
         } else {
             // Default view position - center of loaded data (in world coordinates)
-            (25 - BORDER_SIZE, 25 - BORDER_SIZE)  // Convert from dPiece to world if needed
+            (25 - BORDER_SIZE, 25 - BORDER_SIZE) // Convert from dPiece to world if needed
         };
 
         // Debug: focus render to the 2x2 region around the view center (in dPiece coordinates).
@@ -522,53 +1164,32 @@ impl World {
             );
         }
 
-        // Calculate how many tiles to render
-        // C++ uses columns and rows based on screen size
-        let columns = (screen_width / TILE_WIDTH) + 2;
-        let rows = (viewport_height / (TILE_HEIGHT / 2)) + 4;
+        let viewport_geometry = calc_viewport_geometry(screen_width, viewport_height);
+        let mut columns = viewport_geometry.columns;
+        let mut rows = viewport_geometry.rows;
+        let mut offset_x = viewport_geometry.tile_offset.x;
+        let mut offset_y = viewport_geometry.tile_offset.y;
 
-        // Calculate starting screen offset (center the view)
-        // C++ CalcTileOffset: offset for centering partial tiles
-        // Reference: Source/engine/render/scrollrt.cpp::CalcTileOffset() Line 1518-1541
-        // If remainder != 0, use (TILE_WIDTH - remainder) / 2, not remainder / 2
-        let remainder_x = screen_width % TILE_WIDTH;
-        let remainder_y = viewport_height % TILE_HEIGHT;
-        let offset_x = if remainder_x != 0 {
-            (TILE_WIDTH - remainder_x) / 2
-        } else {
-            0
-        };
-        let offset_y = if remainder_y != 0 {
-            (TILE_HEIGHT - remainder_y) / 2
-        } else {
-            0
-        };
+        let walking_camera_offset = self
+            .entities
+            .first()
+            .map(|player| player.walking_render_offset())
+            .unwrap_or_else(Point::zero);
+        offset_x -= walking_camera_offset.x;
+        offset_y -= walking_camera_offset.y;
 
-        // Calculate starting tile position using isometric coordinate conversion
-        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1722-1767
-        // Player screen position (center of viewport)
-        let player_screen_x = screen_width / 2;
-        let player_screen_y = viewport_height / 2;
-        
-        // Calculate how many tiles from screen center to top/left
-        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1734-1735
-        let tiles_to_top = (player_screen_y + TILE_HEIGHT - 1) / TILE_HEIGHT;
-        let tiles_to_left = (player_screen_x + TILE_WIDTH - 1) / TILE_WIDTH;
-        
-        // Calculate tileShift using isometric direction vectors
-        // Reference: Source/engine/render/scrollrt.cpp::CalcViewportGeometry() Line 1742-1744
-        // tileShift += Displacement(Direction::North) * tilesToTop;
-        // tileShift += Displacement(Direction::West) * tilesToLeft;
-        // Direction::North = (-1, -1), Direction::West = (-1, 1)
-        // tileShift = (-tilesToTop - tilesToLeft, -tilesToTop + tilesToLeft)
-        let tile_shift_x = -tiles_to_top - tiles_to_left;
-        let tile_shift_y = -tiles_to_top + tiles_to_left;
-        
-        // Starting tile position in world coordinates
-        // Reference: Source/engine/render/scrollrt.cpp::CalcFirstTilePosition() Line 1197
-        // position += tileShift;
-        let start_tile_x = view_x + tile_shift_x;
-        let start_tile_y = view_y + tile_shift_y;
+        let mut start_tile_x = view_x + viewport_geometry.tile_shift.x;
+        let mut start_tile_y = view_y + viewport_geometry.tile_shift.y;
+
+        if let Some(player) = self.entities.first().filter(|player| player.walking) {
+            let expansion = walking_viewport_expansion(player.render_direction());
+            start_tile_x += expansion.tile_shift.x;
+            start_tile_y += expansion.tile_shift.y;
+            offset_x += expansion.screen_offset.x;
+            offset_y += expansion.screen_offset.y;
+            columns += expansion.extra_columns;
+            rows += expansion.extra_rows;
+        }
 
         // === Phase 1: Draw Floor (like C++ DrawFloor) ===
         // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1306-1308
@@ -579,7 +1200,7 @@ impl World {
             let mut screen_x = offset_x;
             let mut screen_y = offset_y;
             let mut current_columns = columns;
-            
+
             for row in 0..rows {
                 let mut tx = tile_x;
                 let mut ty = tile_y;
@@ -651,24 +1272,24 @@ impl World {
         // NOTE: Original C++ DrawTileContent renders ALL tiles, not just walls!
         // Only render if render_walls is enabled
         if self.render_debug.render_walls {
-            // ✅ KEY FIX: Extend rows for wall rendering
-            // Reference: C++ DrawTileContent() Line 969: rows += MicroTileLen
-            // MicroTileLen is typically 8 (for 16 blocks / 2)
-            // This ensures tall walls are fully rendered
-            const MICRO_TILE_LEN: i32 = 8;
-            let wall_rows = rows + MICRO_TILE_LEN;
+            // Match C++ DrawTileContent(): rows += MicroTileLen.
+            // Town uses 16 micro blocks per piece, so 8 rows loses tall house roots at viewport edges.
+            let blocks_per_piece = texture_mgr_cell.borrow().blocks_per_piece();
+            let wall_rows = wall_content_rows(rows, blocks_per_piece);
+            let wall_padding = wall_content_scan_padding();
 
             // Reset to starting position
-            let mut wall_tile_x = start_tile_x;
-            let mut wall_tile_y = start_tile_y;
-            let mut wall_screen_x = offset_x;
+            let mut wall_tile_x = start_tile_x + wall_padding.tile_shift.x;
+            let mut wall_tile_y = start_tile_y + wall_padding.tile_shift.y;
+            let mut wall_screen_x = offset_x + wall_padding.screen_x_shift;
             let mut wall_screen_y = offset_y;
-            let mut wall_current_columns = columns;
+            let mut wall_current_columns = columns + wall_padding.extra_columns;
 
             for row in 0..wall_rows {
                 let mut tx = wall_tile_x;
                 let mut ty = wall_tile_y;
                 let mut sx = wall_screen_x;
+                let mut skip = false;
 
                 for _col in 0..wall_current_columns {
                     // Convert world coordinates to dPiece coordinates for array access
@@ -676,40 +1297,65 @@ impl World {
                     let dpiece_y = ty + BORDER_SIZE;
 
                     if !render_focus.contains(dpiece_x, dpiece_y) {
+                        skip = false;
                         tx += 1;
                         ty -= 1;
                         sx += 64;
                         continue;
                     }
-                    
-                    // Get piece_id (returns 0 if out of bounds, matching C++ behavior)
-                    // Reference: C++ DrawTileContent() Line 1031: if (InDungeonBounds(tilePosition))
-                    // C++ returns 0 for out-of-bounds: Line 1192: piece_id = InDungeonBounds(...) ? dPiece[...] : 0
-                    let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
 
-                    // Check IsFloor (same logic as Phase 1)
-                    let is_floor = Self::is_floor(sol_data, level_piece_id);
+                    if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+                        let mut skip_next = false;
 
-                    // ✅ KEY FIX: Render ALL tiles in Phase 2, not just non-floor tiles
-                    // Reference: C++ DrawTileContent() Line 996 calls DrawDungeon() for ALL tiles
-                    // Even if out of bounds (piece_id = 0), we still call draw_cell_at
-                    // draw_cell_at will handle piece_id = 0 gracefully (no rendering)
-                    if log_render_focus {
-                        println!(
-                            "  - phase=cell dpiece=({}, {}) piece_id={}",
-                            dpiece_x, dpiece_y, level_piece_id
-                        );
+                        if Self::should_predraw_east_wall_content(
+                            sol_data,
+                            dungeon_map,
+                            dpiece_x,
+                            dpiece_y,
+                            sx,
+                            screen_width,
+                        ) {
+                            let behind_x = dpiece_x + 1;
+                            let behind_y = dpiece_y - 1;
+
+                            if render_focus.contains(behind_x, behind_y) {
+                                // C++ DrawTileContent renders the tile behind this wall first,
+                                // then skips it when the row scan reaches it normally.
+                                self.draw_tile_content_at(
+                                    engine,
+                                    camera,
+                                    texture_mgr_cell,
+                                    dungeon_map,
+                                    sol_data,
+                                    behind_x,
+                                    behind_y,
+                                    sx + TILE_WIDTH,
+                                    wall_screen_y,
+                                    BORDER_SIZE,
+                                    log_render_focus,
+                                )?;
+                                skip_next = true;
+                            }
+                        }
+
+                        if !skip {
+                            self.draw_tile_content_at(
+                                engine,
+                                camera,
+                                texture_mgr_cell,
+                                dungeon_map,
+                                sol_data,
+                                dpiece_x,
+                                dpiece_y,
+                                sx,
+                                wall_screen_y,
+                                BORDER_SIZE,
+                                log_render_focus,
+                            )?;
+                        }
+
+                        skip = skip_next;
                     }
-                    let _ = self.draw_cell_at(
-                        engine,
-                        texture_mgr_cell,
-                        level_piece_id,
-                        sx,
-                        wall_screen_y,
-                        is_floor,
-                        dpiece_x,
-                        dpiece_y,
-                    );
 
                     tx += 1;
                     ty -= 1;
@@ -758,7 +1404,16 @@ impl World {
         micro_y: i32,
     ) -> Result<()> {
         // Render block 0 (LeftTriangle) at screen_x
-        self.render_micro_tile(engine, texture_mgr, level_piece_id, 0, screen_x, screen_y, micro_x, micro_y)?;
+        self.render_micro_tile(
+            engine,
+            texture_mgr,
+            level_piece_id,
+            0,
+            screen_x,
+            screen_y,
+            micro_x,
+            micro_y,
+        )?;
 
         // Render block 1 (RightTriangle) at screen_x + 32
         self.render_micro_tile(
@@ -817,8 +1472,18 @@ impl World {
                 }
 
                 let texture_id = format!("foliage_{}_{}", level_piece_id, block_index);
+                let cache_key = Self::tile_texture_cache_key(
+                    level_piece_id,
+                    block_index,
+                    1,
+                    self.render_debug.toon_filter,
+                );
                 let rect = Rect::new(screen_x, foliage_y, width, height);
-                engine.draw_rgba_texture(&texture_id, rgba_pixels, width, height, rect)?;
+                engine
+                    .draw_cached_rgba_texture(cache_key, rgba_pixels, width, height, rect)
+                    .or_else(|_| {
+                        engine.draw_rgba_texture(&texture_id, rgba_pixels, width, height, rect)
+                    })?;
             }
             Err(_e) => {
                 // Foliage decode failed, skip
@@ -845,7 +1510,6 @@ impl World {
         const TILE_HEIGHT: i32 = 32;
 
         let blocks_per_piece = texture_mgr.borrow().blocks_per_piece();
-        
 
         // Block 0 (left half)
         {
@@ -946,7 +1610,16 @@ impl World {
         // Each pair of blocks goes up one TILE_HEIGHT
         let mut y = screen_y - TILE_HEIGHT;
         for i in (2..blocks_per_piece).step_by(2) {
-            self.render_micro_tile(engine, texture_mgr, level_piece_id, i, screen_x, y, micro_x, micro_y)?;
+            self.render_micro_tile(
+                engine,
+                texture_mgr,
+                level_piece_id,
+                i,
+                screen_x,
+                y,
+                micro_x,
+                micro_y,
+            )?;
             if i + 1 < blocks_per_piece {
                 self.render_micro_tile(
                     engine,
@@ -1021,12 +1694,12 @@ impl World {
 
                 // Rearrange triangle pixels to match C++ rendering layout
                 use crate::tiles::types::TileType;
-                
-                 if tile_type_num == TileType::LeftTriangle as u8 {
-                     // LeftTriangle: Rust decoder outputs left-aligned, C++ renders right-aligned
-                     // - Lower half (row 0-15): need to right-align (pixels at end of row)
-                     // - Upper half (row 16-30): need left-padding (offset from start)
-                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+
+                if tile_type_num == TileType::LeftTriangle as u8 {
+                    // LeftTriangle: Rust decoder outputs left-aligned, C++ renders right-aligned
+                    // - Lower half (row 0-15): need to right-align (pixels at end of row)
+                    // - Upper half (row 16-30): need left-padding (offset from start)
+                    let mut rearranged = vec![0u8; indexed_pixels.len()];
                     for row in 0..31usize {
                         let row_start = row * 32;
                         if row <= 15 {
@@ -1045,17 +1718,17 @@ impl World {
                             }
                         }
                     }
-                     indexed_pixels = rearranged;
-                 } else if tile_type_num == TileType::RightTriangle as u8 {
-                     // RightTriangle: Rust decoder outputs RIGHT-aligned, C++ renders LEFT-aligned
-                     // Need to move pixels from right side to left side of each row
-                     let mut rearranged = vec![0u8; indexed_pixels.len()];
+                    indexed_pixels = rearranged;
+                } else if tile_type_num == TileType::RightTriangle as u8 {
+                    // RightTriangle: Rust decoder outputs RIGHT-aligned, C++ renders LEFT-aligned
+                    // Need to move pixels from right side to left side of each row
+                    let mut rearranged = vec![0u8; indexed_pixels.len()];
                     for row in 0..31usize {
                         let row_start = row * 32;
                         let pixel_width = if row <= 15 {
-                            2 * (row + 1)  // 2, 4, 6, ..., 32
+                            2 * (row + 1) // 2, 4, 6, ..., 32
                         } else {
-                            32 - 2 * (row - 15)  // 30, 28, 26, ..., 2
+                            32 - 2 * (row - 15) // 30, 28, 26, ..., 2
                         };
                         // Rust decoder has pixels at the END of row (right-aligned)
                         // C++ expects pixels at the START of row (left-aligned)
@@ -1064,52 +1737,52 @@ impl World {
                             rearranged[row_start + i] = indexed_pixels[row_start + src_offset + i];
                         }
                     }
-                     indexed_pixels = rearranged;
-                 } else if tile_type_num == TileType::LeftTrapezoid as u8 {
-                     // LeftTrapezoid: lower half is rendered using LeftTriangleLower in C++,
-                     // which expects the triangle part to be right-aligned. Upper half is a
-                     // full-width rectangle and does not need reordering.
-                     let mut rearranged = vec![0u8; indexed_pixels.len()];
-                     for row in 0..32usize {
-                         let row_start = row * 32;
-                         if row <= 15 {
-                             let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
-                             let offset = 32 - pixel_width;
-                             rearranged[row_start + offset..row_start + offset + pixel_width]
-                                 .copy_from_slice(
-                                     &indexed_pixels[row_start..row_start + pixel_width],
-                                 );
-                         } else {
-                             rearranged[row_start..row_start + 32]
-                                 .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
-                         }
-                     }
-                     indexed_pixels = rearranged;
-                 } else if tile_type_num == TileType::RightTrapezoid as u8 {
-                     // RightTrapezoid: lower half is rendered using RightTriangleLower in C++,
-                     // which expects the triangle part to be left-aligned. Upper half is a
-                     // full-width rectangle and does not need reordering.
-                     let mut rearranged = vec![0u8; indexed_pixels.len()];
-                     for row in 0..32usize {
-                         let row_start = row * 32;
-                         if row <= 15 {
-                             let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
-                             let src_offset = 32 - pixel_width;
-                             rearranged[row_start..row_start + pixel_width].copy_from_slice(
-                                 &indexed_pixels[row_start + src_offset
-                                     ..row_start + src_offset + pixel_width],
-                             );
-                         } else {
-                             rearranged[row_start..row_start + 32]
-                                 .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
-                         }
-                     }
-                     indexed_pixels = rearranged;
-                 }
+                    indexed_pixels = rearranged;
+                } else if tile_type_num == TileType::LeftTrapezoid as u8 {
+                    // LeftTrapezoid: lower half is rendered using LeftTriangleLower in C++,
+                    // which expects the triangle part to be right-aligned. Upper half is a
+                    // full-width rectangle and does not need reordering.
+                    let mut rearranged = vec![0u8; indexed_pixels.len()];
+                    for row in 0..32usize {
+                        let row_start = row * 32;
+                        if row <= 15 {
+                            let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
+                            let offset = 32 - pixel_width;
+                            rearranged[row_start + offset..row_start + offset + pixel_width]
+                                .copy_from_slice(
+                                    &indexed_pixels[row_start..row_start + pixel_width],
+                                );
+                        } else {
+                            rearranged[row_start..row_start + 32]
+                                .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                        }
+                    }
+                    indexed_pixels = rearranged;
+                } else if tile_type_num == TileType::RightTrapezoid as u8 {
+                    // RightTrapezoid: lower half is rendered using RightTriangleLower in C++,
+                    // which expects the triangle part to be left-aligned. Upper half is a
+                    // full-width rectangle and does not need reordering.
+                    let mut rearranged = vec![0u8; indexed_pixels.len()];
+                    for row in 0..32usize {
+                        let row_start = row * 32;
+                        if row <= 15 {
+                            let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
+                            let src_offset = 32 - pixel_width;
+                            rearranged[row_start..row_start + pixel_width].copy_from_slice(
+                                &indexed_pixels
+                                    [row_start + src_offset..row_start + src_offset + pixel_width],
+                            );
+                        } else {
+                            rearranged[row_start..row_start + 32]
+                                .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                        }
+                    }
+                    indexed_pixels = rearranged;
+                }
 
-                 // Convert indexed pixels to RGBA using palette
+                // Convert indexed pixels to RGBA using palette
                 let mgr = texture_mgr.borrow();
-                 let rgba_pixels = mgr.palette().indices_to_rgba(&indexed_pixels, true);
+                let rgba_pixels = mgr.palette().indices_to_rgba(&indexed_pixels, true);
                 drop(mgr);
 
                 let expected_size = (width * height * 4) as usize;
@@ -1137,12 +1810,22 @@ impl World {
                 }
 
                 let texture_id = format!("tile_{}_{}", level_piece_id, block_index);
+                let cache_key = Self::tile_texture_cache_key(
+                    level_piece_id,
+                    block_index,
+                    0,
+                    self.render_debug.toon_filter,
+                );
                 // screen_y is the BOTTOM of the tile (like C++ position.y)
                 // But Rect::new expects TOP-LEFT corner, so convert
                 let rect_y = screen_y - height as i32 + 1;
                 let rect = Rect::new(screen_x, rect_y, width, height);
-                
-                engine.draw_rgba_texture(&texture_id, &rgba_pixels, width, height, rect)?;
+
+                engine
+                    .draw_cached_rgba_texture(cache_key, &rgba_pixels, width, height, rect)
+                    .or_else(|_| {
+                        engine.draw_rgba_texture(&texture_id, &rgba_pixels, width, height, rect)
+                    })?;
             }
             Err(_) => {
                 // Silently ignore decode errors
