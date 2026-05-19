@@ -15,6 +15,12 @@ use crate::sprite::AnimationState;
 use crate::tiles::{texture_manager::TileTextureManager, MinData, SolData, TilData};
 use anyhow::Result;
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
+use std::time::{Duration, Instant};
 
 pub mod collision;
 pub mod dungeon_map;
@@ -23,6 +29,91 @@ pub mod town;
 pub use collision::{CollisionMap, TileType};
 pub use dungeon_map::{DungeonMap, DMAXX, DMAXY, MAXDUNX, MAXDUNY};
 pub use town::SimpleTown;
+
+const RENDER_FOCUS_TRACE_SAMPLE_INTERVAL: u64 = 8;
+const RENDER_PERF_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+static RENDER_FOCUS_TRACE_FRAME: AtomicU64 = AtomicU64::new(0);
+static RENDER_PERF_ACCUMULATOR: Mutex<RenderPerfAccumulator> =
+    Mutex::new(RenderPerfAccumulator::new());
+static MICRO_TEXTURE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static MICRO_TEXTURE_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static FOLIAGE_TEXTURE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static FOLIAGE_TEXTURE_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Default)]
+struct RenderPerfFrame {
+    total_time: Duration,
+    floor_time: Duration,
+    wall_time: Duration,
+    floor_tiles: u64,
+    wall_scan_tiles: u64,
+    wall_cells: u64,
+    predraw_cells: u64,
+    micro_cache_hits: u64,
+    micro_cache_misses: u64,
+    foliage_cache_hits: u64,
+    foliage_cache_misses: u64,
+    texture_cache_size: u64,
+}
+
+struct RenderPerfAccumulator {
+    frames: u64,
+    total_time: Duration,
+    floor_time: Duration,
+    wall_time: Duration,
+    floor_tiles: u64,
+    wall_scan_tiles: u64,
+    wall_cells: u64,
+    predraw_cells: u64,
+    micro_cache_hits: u64,
+    micro_cache_misses: u64,
+    foliage_cache_hits: u64,
+    foliage_cache_misses: u64,
+    texture_cache_size: u64,
+    last_report: Option<Instant>,
+}
+
+impl RenderPerfAccumulator {
+    const fn new() -> Self {
+        Self {
+            frames: 0,
+            total_time: Duration::ZERO,
+            floor_time: Duration::ZERO,
+            wall_time: Duration::ZERO,
+            floor_tiles: 0,
+            wall_scan_tiles: 0,
+            wall_cells: 0,
+            predraw_cells: 0,
+            micro_cache_hits: 0,
+            micro_cache_misses: 0,
+            foliage_cache_hits: 0,
+            foliage_cache_misses: 0,
+            texture_cache_size: 0,
+            last_report: None,
+        }
+    }
+
+    fn add_frame(&mut self, frame: RenderPerfFrame) {
+        self.frames += 1;
+        self.total_time += frame.total_time;
+        self.floor_time += frame.floor_time;
+        self.wall_time += frame.wall_time;
+        self.floor_tiles += frame.floor_tiles;
+        self.wall_scan_tiles += frame.wall_scan_tiles;
+        self.wall_cells += frame.wall_cells;
+        self.predraw_cells += frame.predraw_cells;
+        self.micro_cache_hits += frame.micro_cache_hits;
+        self.micro_cache_misses += frame.micro_cache_misses;
+        self.foliage_cache_hits += frame.foliage_cache_hits;
+        self.foliage_cache_misses += frame.foliage_cache_misses;
+        self.texture_cache_size = frame.texture_cache_size;
+    }
+
+    fn reset(&mut self, now: Instant) {
+        *self = Self::new();
+        self.last_report = Some(now);
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct RenderFocus {
@@ -79,6 +170,14 @@ struct WalkingViewportExpansion {
     screen_offset: Point,
     extra_columns: i32,
     extra_rows: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderScanGeometry {
+    start_tile: Point,
+    tile_offset: Point,
+    columns: i32,
+    rows: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +313,35 @@ fn wall_content_rows(rows: i32, micro_tile_len: usize) -> i32 {
     rows + micro_tile_len as i32
 }
 
+fn calc_render_scan_geometry(
+    view_position: Point,
+    screen_width: i32,
+    viewport_height: i32,
+    walking_direction: Option<Direction>,
+    walking_camera_offset: Point,
+) -> RenderScanGeometry {
+    let viewport_geometry = calc_viewport_geometry(screen_width, viewport_height);
+    let mut scan = RenderScanGeometry {
+        start_tile: view_position + viewport_geometry.tile_shift,
+        tile_offset: Point::new(
+            viewport_geometry.tile_offset.x - walking_camera_offset.x,
+            viewport_geometry.tile_offset.y - walking_camera_offset.y,
+        ),
+        columns: viewport_geometry.columns,
+        rows: viewport_geometry.rows,
+    };
+
+    if let Some(direction) = walking_direction {
+        let expansion = walking_viewport_expansion(direction);
+        scan.start_tile = scan.start_tile + expansion.tile_shift;
+        scan.tile_offset = scan.tile_offset + expansion.screen_offset;
+        scan.columns += expansion.extra_columns;
+        scan.rows += expansion.extra_rows;
+    }
+
+    scan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +446,45 @@ mod tests {
     }
 
     #[test]
+    fn test_render_scan_geometry_applies_camera_mode_offset() {
+        let view_position = Point::new(56, 56);
+        let base = calc_viewport_geometry(640, 480);
+        let scan = calc_render_scan_geometry(
+            view_position,
+            640,
+            480,
+            Some(Direction::East),
+            Direction::East.walking_render_offset(0.5),
+        );
+
+        assert_eq!(base.tile_offset, Point::new(0, -17));
+        assert_eq!(
+            scan.tile_offset,
+            Point::new(base.tile_offset.x - 32, base.tile_offset.y)
+        );
+        assert_eq!(scan.start_tile, view_position + base.tile_shift);
+        assert_eq!(scan.columns, base.columns + 1);
+        assert_eq!(scan.rows, base.rows);
+    }
+
+    #[test]
+    fn test_render_scan_geometry_stays_base_when_camera_offset_disabled() {
+        let view_position = Point::new(56, 56);
+        let base = calc_viewport_geometry(640, 480);
+        let scan = calc_render_scan_geometry(view_position, 640, 480, None, Point::zero());
+
+        assert_eq!(
+            scan,
+            RenderScanGeometry {
+                start_tile: view_position + base.tile_shift,
+                tile_offset: base.tile_offset,
+                columns: base.columns,
+                rows: base.rows,
+            }
+        );
+    }
+
+    #[test]
     fn test_wall_content_scan_pads_one_column_each_side() {
         assert_eq!(
             wall_content_scan_padding(),
@@ -396,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wall_content_predraw_matches_cpp_x_axis_gate() {
+    fn test_wall_content_predraw_matches_cpp_right_edge_gate() {
         use crate::tiles::types::TileProperties;
 
         let mut dungeon_map = DungeonMap::new();
@@ -435,7 +602,18 @@ mod tests {
                 577,
                 640
             ),
-            "the pre-draw should not run when the east tile is fully outside the viewport"
+            "the original gate stops once the tile would extend past the right edge"
+        );
+        assert!(
+            !World::should_predraw_east_wall_content(
+                Some(&sol_data),
+                &dungeon_map,
+                dpiece_x as i32,
+                dpiece_y as i32,
+                641,
+                640
+            ),
+            "the pre-draw should stop once the source tile starts beyond the viewport"
         );
 
         sol_data.properties[floor_piece_id as usize] = TileProperties::SOLID;
@@ -451,12 +629,251 @@ mod tests {
             "the pre-draw is only for walls with walkable space behind them"
         );
     }
+
+    #[test]
+    fn test_tile_texture_cache_key_separates_floor_from_draw_cell() {
+        let normal = World::tile_texture_cache_key(
+            7,
+            1,
+            TileTextureKind::Normal,
+            DrawCellMask::Solid,
+            false,
+        );
+        let floor =
+            World::tile_texture_cache_key(7, 1, TileTextureKind::Floor, DrawCellMask::Solid, false);
+        let foliage = World::tile_texture_cache_key(
+            7,
+            1,
+            TileTextureKind::Foliage,
+            DrawCellMask::Solid,
+            false,
+        );
+
+        assert_ne!(normal, floor);
+        assert_ne!(normal, foliage);
+        assert_ne!(floor, foliage);
+    }
+
+    #[test]
+    fn test_draw_cell_mask_first_tiles_match_cpp_rules() {
+        use crate::tiles::types::{TileProperties, TileType};
+
+        assert_eq!(
+            DrawCellMask::first_left(TileType::Square, false, TileProperties::NONE),
+            DrawCellMask::Solid
+        );
+        assert_eq!(
+            DrawCellMask::first_left(
+                TileType::TransparentSquare,
+                true,
+                TileProperties::TRANSPARENT | TileProperties::TRANSPARENT_LEFT,
+            ),
+            DrawCellMask::Left
+        );
+        assert_eq!(
+            DrawCellMask::first_right(
+                TileType::TransparentSquare,
+                true,
+                TileProperties::TRANSPARENT | TileProperties::TRANSPARENT_RIGHT,
+            ),
+            DrawCellMask::Right
+        );
+        assert_eq!(
+            DrawCellMask::first_left(TileType::RightTrapezoid, true, TileProperties::TRANSPARENT),
+            DrawCellMask::Transparent
+        );
+        assert_eq!(
+            DrawCellMask::first_right(TileType::LeftTriangle, true, TileProperties::TRANSPARENT),
+            DrawCellMask::Transparent
+        );
+    }
+
+    #[test]
+    fn test_draw_cell_mask_upper_blocks_match_cpp_rules() {
+        assert_eq!(DrawCellMask::upper_block(false), DrawCellMask::Solid);
+        assert_eq!(DrawCellMask::upper_block(true), DrawCellMask::Transparent);
+        assert_eq!(
+            DrawCellMask::Transparent.enabled(false),
+            DrawCellMask::Solid
+        );
+    }
+
+    #[test]
+    fn test_draw_cell_mask_transparent_alpha_affects_visible_pixels_only() {
+        let mut pixels = vec![10u8, 20, 30, 255, 40, 50, 60, 0];
+
+        World::apply_draw_cell_mask_to_rgba(&mut pixels, 2, 1, DrawCellMask::Transparent);
+
+        assert_eq!(pixels[3], DrawCellMask::TRANSPARENT_ALPHA);
+        assert_eq!(pixels[7], 0);
+    }
+
+    #[test]
+    fn test_draw_cell_mask_left_and_right_are_upper_half_diagonals() {
+        let mut left_pixels = [1u8, 1, 1, 255].repeat(32 * 32);
+        let mut right_pixels = left_pixels.clone();
+
+        World::apply_draw_cell_mask_to_rgba(&mut left_pixels, 32, 32, DrawCellMask::Left);
+        World::apply_draw_cell_mask_to_rgba(&mut right_pixels, 32, 32, DrawCellMask::Right);
+
+        let alpha = |pixels: &[u8], x: usize, y: usize| pixels[(y * 32 + x) * 4 + 3];
+
+        assert_eq!(alpha(&left_pixels, 0, 15), 255);
+        assert_eq!(alpha(&right_pixels, 31, 15), 255);
+
+        assert_eq!(alpha(&left_pixels, 0, 16), DrawCellMask::TRANSPARENT_ALPHA);
+        assert_eq!(alpha(&left_pixels, 31, 16), 255);
+        assert_eq!(
+            alpha(&right_pixels, 31, 16),
+            DrawCellMask::TRANSPARENT_ALPHA
+        );
+        assert_eq!(alpha(&right_pixels, 0, 16), 255);
+
+        assert_eq!(alpha(&left_pixels, 0, 31), 255);
+        assert_eq!(alpha(&right_pixels, 31, 31), 255);
+    }
+
+    #[test]
+    fn test_floor_triangle_extraction_uses_original_halves() {
+        use crate::tiles::types::TileType;
+
+        let mut source = vec![0u8; 32 * 32];
+        for row in 0..32usize {
+            for col in 0..32usize {
+                source[row * 32 + col] = col as u8;
+            }
+        }
+
+        let left = World::extract_floor_triangle_pixels(&source, 32, 32, TileType::LeftTriangle);
+        let right = World::extract_floor_triangle_pixels(&source, 32, 32, TileType::RightTriangle);
+
+        assert_eq!(left[0], 30);
+        assert_eq!(left[1], 31);
+        assert_eq!(right[30], 0);
+        assert_eq!(right[31], 1);
+
+        let row15 = 15 * 32;
+        assert_eq!(left[row15], 0);
+        assert_eq!(left[row15 + 31], 31);
+        assert_eq!(right[row15], 0);
+        assert_eq!(right[row15 + 31], 31);
+    }
 }
 
 #[derive(Default)]
 struct RenderScratch {
     luminance: Vec<u8>,
     edges: Vec<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawCellMask {
+    Solid,
+    Transparent,
+    Left,
+    Right,
+}
+
+impl DrawCellMask {
+    const TRANSPARENT_ALPHA: u8 = 128;
+
+    fn first_left(
+        tile: crate::tiles::types::TileType,
+        transparency: bool,
+        props: crate::tiles::types::TileProperties,
+    ) -> Self {
+        use crate::tiles::types::{TileProperties, TileType};
+
+        if !transparency {
+            return Self::Solid;
+        }
+
+        match tile {
+            TileType::LeftTrapezoid | TileType::TransparentSquare => {
+                if props.contains(TileProperties::TRANSPARENT_LEFT) {
+                    Self::Left
+                } else {
+                    Self::Solid
+                }
+            }
+            TileType::LeftTriangle => Self::Solid,
+            _ => Self::Transparent,
+        }
+    }
+
+    fn first_right(
+        tile: crate::tiles::types::TileType,
+        transparency: bool,
+        props: crate::tiles::types::TileProperties,
+    ) -> Self {
+        use crate::tiles::types::{TileProperties, TileType};
+
+        if !transparency {
+            return Self::Solid;
+        }
+
+        match tile {
+            TileType::RightTrapezoid | TileType::TransparentSquare => {
+                if props.contains(TileProperties::TRANSPARENT_RIGHT) {
+                    Self::Right
+                } else {
+                    Self::Solid
+                }
+            }
+            TileType::RightTriangle => Self::Solid,
+            _ => Self::Transparent,
+        }
+    }
+
+    fn upper_block(transparency: bool) -> Self {
+        if transparency {
+            Self::Transparent
+        } else {
+            Self::Solid
+        }
+    }
+
+    fn enabled(self, enabled: bool) -> Self {
+        if enabled {
+            self
+        } else {
+            Self::Solid
+        }
+    }
+
+    fn cache_index(self) -> usize {
+        match self {
+            Self::Solid => 0,
+            Self::Transparent => 1,
+            Self::Left => 2,
+            Self::Right => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileTextureKind {
+    Normal,
+    Floor,
+    Foliage,
+}
+
+impl TileTextureKind {
+    fn cache_index(self) -> usize {
+        match self {
+            Self::Normal => 0,
+            Self::Floor => 1,
+            Self::Foliage => 2,
+        }
+    }
+
+    fn texture_id_fragment(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Floor => "floor",
+            Self::Foliage => "foliage",
+        }
+    }
 }
 
 /// World - Game world representation
@@ -490,6 +907,7 @@ pub struct World {
     pub render_debug: RenderDebugFlags,
     require_entity_textures: bool,
     render_scratch: RefCell<RenderScratch>,
+    skipped_foliage_cache: RefCell<HashSet<usize>>,
 }
 
 // Isometric projection constants
@@ -517,6 +935,65 @@ pub fn screen_to_world(screen_x: i32, screen_y: i32) -> (i32, i32) {
 }
 
 impl World {
+    fn next_render_focus_trace_frame(enabled: bool) -> Option<u64> {
+        if !enabled {
+            return None;
+        }
+
+        let frame = RENDER_FOCUS_TRACE_FRAME.fetch_add(1, Ordering::Relaxed) + 1;
+        if frame % RENDER_FOCUS_TRACE_SAMPLE_INTERVAL == 0 {
+            Some(frame)
+        } else {
+            None
+        }
+    }
+
+    fn record_render_perf(frame_perf: RenderPerfFrame, debug: &RenderDebugFlags) {
+        let now = Instant::now();
+        let Ok(mut accumulator) = RENDER_PERF_ACCUMULATOR.lock() else {
+            return;
+        };
+
+        let last_report = *accumulator.last_report.get_or_insert(now);
+        let mut frame_perf = frame_perf;
+        frame_perf.micro_cache_hits = MICRO_TEXTURE_CACHE_HITS.swap(0, Ordering::Relaxed);
+        frame_perf.micro_cache_misses = MICRO_TEXTURE_CACHE_MISSES.swap(0, Ordering::Relaxed);
+        frame_perf.foliage_cache_hits = FOLIAGE_TEXTURE_CACHE_HITS.swap(0, Ordering::Relaxed);
+        frame_perf.foliage_cache_misses = FOLIAGE_TEXTURE_CACHE_MISSES.swap(0, Ordering::Relaxed);
+        accumulator.add_frame(frame_perf);
+
+        let elapsed = now.duration_since(last_report);
+        if elapsed < RENDER_PERF_REPORT_INTERVAL {
+            return;
+        }
+
+        let frames = accumulator.frames.max(1);
+        let frames_f64 = frames as f64;
+        println!(
+            "[render-perf] frames={} seconds={:.2} avg_world_ms={:.2} avg_floor_ms={:.2} avg_wall_ms={:.2} floor_tiles/frame={:.1} wall_scan/frame={:.1} wall_cells/frame={:.1} predraw/frame={:.1} micro_cache_hit/frame={:.1} micro_cache_miss/frame={:.1} foliage_cache_hit/frame={:.1} foliage_cache_miss/frame={:.1} texture_cache_size={} floor={} walls={} cam={} mask={}",
+            frames,
+            elapsed.as_secs_f64(),
+            accumulator.total_time.as_secs_f64() * 1000.0 / frames_f64,
+            accumulator.floor_time.as_secs_f64() * 1000.0 / frames_f64,
+            accumulator.wall_time.as_secs_f64() * 1000.0 / frames_f64,
+            accumulator.floor_tiles as f64 / frames_f64,
+            accumulator.wall_scan_tiles as f64 / frames_f64,
+            accumulator.wall_cells as f64 / frames_f64,
+            accumulator.predraw_cells as f64 / frames_f64,
+            accumulator.micro_cache_hits as f64 / frames_f64,
+            accumulator.micro_cache_misses as f64 / frames_f64,
+            accumulator.foliage_cache_hits as f64 / frames_f64,
+            accumulator.foliage_cache_misses as f64 / frames_f64,
+            accumulator.texture_cache_size,
+            debug.render_floor,
+            debug.render_walls,
+            debug.walking_camera_offset,
+            debug.mask_aware_draw_cell
+        );
+
+        accumulator.reset(now);
+    }
+
     /// Create a new world
     ///
     /// # Arguments
@@ -558,6 +1035,7 @@ impl World {
             render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
             require_entity_textures: false,
             render_scratch: RefCell::new(RenderScratch::default()),
+            skipped_foliage_cache: RefCell::new(HashSet::new()),
         }
     }
 
@@ -997,10 +1475,13 @@ impl World {
     fn tile_texture_cache_key(
         level_piece_id: usize,
         block_index: usize,
-        kind: usize,
+        kind: TileTextureKind,
+        mask: DrawCellMask,
         stylized: bool,
     ) -> usize {
-        (((level_piece_id * 32) + block_index) * 4) + (kind * 2) + usize::from(stylized)
+        ((((level_piece_id * 32) + block_index) * 3 + kind.cache_index()) * 4 + mask.cache_index())
+            * 2
+            + usize::from(stylized)
     }
 
     fn is_floor(sol: Option<&SolData>, piece_id: usize) -> bool {
@@ -1076,15 +1557,18 @@ impl World {
         screen_x: i32,
         screen_y: i32,
         border_size: i32,
-        log_render_focus: bool,
+        trace_frame: Option<u64>,
     ) -> Result<()> {
         let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
         let is_floor = Self::is_floor(sol_data, level_piece_id);
+        let tile_props = sol_data
+            .and_then(|sol| sol.get(level_piece_id))
+            .unwrap_or(crate::tiles::types::TileProperties::NONE);
 
-        if log_render_focus {
+        if let Some(frame) = trace_frame {
             println!(
-                "  - phase=cell dpiece=({}, {}) piece_id={}",
-                dpiece_x, dpiece_y, level_piece_id
+                "  [render-trace #{:06}] pass=cell-scan dpiece=({}, {}) piece={} is_floor={} props={:?} dst=({}, {})",
+                frame, dpiece_x, dpiece_y, level_piece_id, is_floor, tile_props, screen_x, screen_y
             );
         }
 
@@ -1095,8 +1579,10 @@ impl World {
             screen_x,
             screen_y,
             is_floor,
+            tile_props,
             dpiece_x,
             dpiece_y,
+            trace_frame,
         )?;
         self.render_entities_at_dpiece(
             engine,
@@ -1113,6 +1599,8 @@ impl World {
     ///
     /// # Reference
     fn render_with_texture_manager(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
+        let render_start = Instant::now();
+        let mut perf = RenderPerfFrame::default();
         let texture_mgr_cell = self.texture_manager.as_ref().unwrap();
         let dungeon_map = match self.dungeon_map.as_ref() {
             Some(dm) => dm,
@@ -1152,9 +1640,11 @@ impl World {
         } else {
             RenderFocus::disabled()
         };
-        if log_render_focus {
+        let trace_frame = Self::next_render_focus_trace_frame(log_render_focus);
+        if let Some(frame) = trace_frame {
             println!(
-                "[RENDER_FOCUS_2X2] view_world=({}, {}), focus_dpiece_x=[{}..{}], focus_dpiece_y=[{}..{}]",
+                "[render-trace #{:06}] view_world=({}, {}) focus_dpiece_x=[{}..{}] focus_dpiece_y=[{}..{}]",
+                frame,
                 view_x,
                 view_y,
                 render_focus.min_x,
@@ -1164,37 +1654,50 @@ impl World {
             );
         }
 
-        let viewport_geometry = calc_viewport_geometry(screen_width, viewport_height);
-        let mut columns = viewport_geometry.columns;
-        let mut rows = viewport_geometry.rows;
-        let mut offset_x = viewport_geometry.tile_offset.x;
-        let mut offset_y = viewport_geometry.tile_offset.y;
-
-        let walking_camera_offset = self
+        let walking_player = self
             .entities
             .first()
+            .filter(|player| self.render_debug.walking_camera_offset && player.walking);
+        let walking_direction = walking_player.map(|player| player.render_direction());
+        let walking_camera_offset = walking_player
             .map(|player| player.walking_render_offset())
             .unwrap_or_else(Point::zero);
-        offset_x -= walking_camera_offset.x;
-        offset_y -= walking_camera_offset.y;
-
-        let mut start_tile_x = view_x + viewport_geometry.tile_shift.x;
-        let mut start_tile_y = view_y + viewport_geometry.tile_shift.y;
-
-        if let Some(player) = self.entities.first().filter(|player| player.walking) {
-            let expansion = walking_viewport_expansion(player.render_direction());
-            start_tile_x += expansion.tile_shift.x;
-            start_tile_y += expansion.tile_shift.y;
-            offset_x += expansion.screen_offset.x;
-            offset_y += expansion.screen_offset.y;
-            columns += expansion.extra_columns;
-            rows += expansion.extra_rows;
+        let scan = calc_render_scan_geometry(
+            Point::new(view_x, view_y),
+            screen_width,
+            viewport_height,
+            walking_direction,
+            walking_camera_offset,
+        );
+        if let Some(frame) = trace_frame {
+            println!(
+                "[render-trace #{:06}] scan start_tile=({}, {}) tile_offset=({}, {}) columns={} rows={} walking_dir={:?} walking_offset=({}, {}) cam={}",
+                frame,
+                scan.start_tile.x,
+                scan.start_tile.y,
+                scan.tile_offset.x,
+                scan.tile_offset.y,
+                scan.columns,
+                scan.rows,
+                walking_direction,
+                walking_camera_offset.x,
+                walking_camera_offset.y,
+                if self.render_debug.walking_camera_offset { "ON" } else { "OFF" }
+            );
         }
+
+        let columns = scan.columns;
+        let rows = scan.rows;
+        let offset_x = scan.tile_offset.x;
+        let offset_y = scan.tile_offset.y;
+        let start_tile_x = scan.start_tile.x;
+        let start_tile_y = scan.start_tile.y;
 
         // === Phase 1: Draw Floor (like C++ DrawFloor) ===
         // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1306-1308
         // Render all floor tiles in the view (only if render_floor is enabled)
         if self.render_debug.render_floor {
+            let floor_start = Instant::now();
             let mut tile_x = start_tile_x;
             let mut tile_y = start_tile_y;
             let mut screen_x = offset_x;
@@ -1225,10 +1728,10 @@ impl World {
 
                         // Render the tile (frame 311 filtering is done in render_micro_tile)
                         if is_floor {
-                            if log_render_focus {
+                            if let Some(frame) = trace_frame {
                                 println!(
-                                    "  - phase=floor dpiece=({}, {}) piece_id={}",
-                                    dpiece_x, dpiece_y, level_piece_id
+                                    "  [render-trace #{:06}] pass=floor-scan dpiece=({}, {}) piece={} dst=({}, {})",
+                                    frame, dpiece_x, dpiece_y, level_piece_id, sx, screen_y
                                 );
                             }
                             let _ = self.draw_floor_at(
@@ -1239,12 +1742,10 @@ impl World {
                                 screen_y,
                                 dpiece_x,
                                 dpiece_y,
+                                trace_frame,
                             );
+                            perf.floor_tiles += 1;
                         }
-                    } else {
-                        // Out of bounds: render black invisible tile
-                        // This ensures that areas outside the map are explicitly black
-                        self.draw_black_tile(engine, sx, screen_y)?;
                     }
 
                     tx += 1;
@@ -1264,6 +1765,7 @@ impl World {
                     screen_x -= TILE_WIDTH / 2;
                 }
             }
+            perf.floor_time = floor_start.elapsed();
         }
 
         // === Phase 2: Draw Walls/Cells (like C++ DrawTileContent/DrawCell) ===
@@ -1272,6 +1774,7 @@ impl World {
         // NOTE: Original C++ DrawTileContent renders ALL tiles, not just walls!
         // Only render if render_walls is enabled
         if self.render_debug.render_walls {
+            let wall_start = Instant::now();
             // Match C++ DrawTileContent(): rows += MicroTileLen.
             // Town uses 16 micro blocks per piece, so 8 rows loses tall house roots at viewport edges.
             let blocks_per_piece = texture_mgr_cell.borrow().blocks_per_piece();
@@ -1305,16 +1808,19 @@ impl World {
                     }
 
                     if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+                        perf.wall_scan_tiles += 1;
                         let mut skip_next = false;
 
-                        if Self::should_predraw_east_wall_content(
-                            sol_data,
-                            dungeon_map,
-                            dpiece_x,
-                            dpiece_y,
-                            sx,
-                            screen_width,
-                        ) {
+                        if self.render_debug.wall_predraw
+                            && Self::should_predraw_east_wall_content(
+                                sol_data,
+                                dungeon_map,
+                                dpiece_x,
+                                dpiece_y,
+                                sx,
+                                screen_width,
+                            )
+                        {
                             let behind_x = dpiece_x + 1;
                             let behind_y = dpiece_y - 1;
 
@@ -1332,9 +1838,22 @@ impl World {
                                     sx + TILE_WIDTH,
                                     wall_screen_y,
                                     BORDER_SIZE,
-                                    log_render_focus,
+                                    trace_frame,
                                 )?;
+                                perf.predraw_cells += 1;
                                 skip_next = true;
+                                if let Some(frame) = trace_frame {
+                                    println!(
+                                        "  [render-trace #{:06}] pass=wall-predraw source_dpiece=({}, {}) predraw_dpiece=({}, {}) dst=({}, {}) skip_next=true",
+                                        frame,
+                                        dpiece_x,
+                                        dpiece_y,
+                                        behind_x,
+                                        behind_y,
+                                        sx + TILE_WIDTH,
+                                        wall_screen_y
+                                    );
+                                }
                             }
                         }
 
@@ -1350,8 +1869,9 @@ impl World {
                                 sx,
                                 wall_screen_y,
                                 BORDER_SIZE,
-                                log_render_focus,
+                                trace_frame,
                             )?;
+                            perf.wall_cells += 1;
                         }
 
                         skip = skip_next;
@@ -1374,16 +1894,15 @@ impl World {
                     wall_screen_x -= TILE_WIDTH / 2;
                 }
             }
+            perf.wall_time = wall_start.elapsed();
         }
 
+        perf.total_time = render_start.elapsed();
+        perf.texture_cache_size = engine.tile_texture_cache_stats().0 as u64;
+        Self::record_render_perf(perf, &self.render_debug);
         Ok(())
     }
 
-    /// Draw floor tile at screen position
-    ///
-    /// # Reference
-    /// Draw floor tile at screen position
-    ///
     /// # Reference
     /// Original: `Source/engine/render/scrollrt.cpp::DrawFloorTile()` Line 652-677
     /// C++ DrawFloorTile:
@@ -1392,7 +1911,8 @@ impl World {
     /// - Only checks hasValue(), ignores actual TileType stored in block
     /// - Uses fixed height: DunFrameTriangleHeight = 31
     ///
-    /// Rust implementation: Use simple decode-then-render approach
+    /// Rust implementation decodes the source frame by its real MIN type, then
+    /// clips it to the floor triangle footprint used by the original renderer.
     fn draw_floor_at(
         &self,
         engine: &mut Engine,
@@ -1402,9 +1922,12 @@ impl World {
         screen_y: i32,
         micro_x: i32,
         micro_y: i32,
+        trace_frame: Option<u64>,
     ) -> Result<()> {
+        use crate::tiles::types::TileType;
+
         // Render block 0 (LeftTriangle) at screen_x
-        self.render_micro_tile(
+        self.render_floor_micro_tile(
             engine,
             texture_mgr,
             level_piece_id,
@@ -1413,10 +1936,12 @@ impl World {
             screen_y,
             micro_x,
             micro_y,
+            TileType::LeftTriangle,
+            trace_frame,
         )?;
 
         // Render block 1 (RightTriangle) at screen_x + 32
-        self.render_micro_tile(
+        self.render_floor_micro_tile(
             engine,
             texture_mgr,
             level_piece_id,
@@ -1425,6 +1950,8 @@ impl World {
             screen_y,
             micro_x + 1,
             micro_y,
+            TileType::RightTriangle,
+            trace_frame,
         )?;
 
         Ok(())
@@ -1446,9 +1973,45 @@ impl World {
         block_index: usize,
         screen_x: i32,
         screen_y: i32,
+        trace_frame: Option<u64>,
     ) -> Result<()> {
         // C++: RenderTileFoliage renders at position.y - 16
         let foliage_y = screen_y - 16;
+        let width = 32u32;
+        let height = 16u32;
+        let cache_key = Self::tile_texture_cache_key(
+            level_piece_id,
+            block_index,
+            TileTextureKind::Foliage,
+            DrawCellMask::Solid,
+            self.render_debug.toon_filter,
+        );
+        let rect = Rect::new(screen_x, foliage_y, width, height);
+
+        if self.skipped_foliage_cache.borrow().contains(&cache_key) {
+            return Ok(());
+        }
+
+        if engine.draw_cached_texture(cache_key, rect)? {
+            FOLIAGE_TEXTURE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            if let Some(frame) = trace_frame {
+                println!(
+                    "    [render-trace #{:06}] pass=foliage-cache-hit kind={:?} piece={} block={} dst=({}, {}) rect=({}, {}) size={}x{}",
+                    frame,
+                    TileTextureKind::Foliage,
+                    level_piece_id,
+                    block_index,
+                    screen_x,
+                    foliage_y,
+                    rect.x,
+                    rect.y,
+                    width,
+                    height
+                );
+            }
+            return Ok(());
+        }
+        FOLIAGE_TEXTURE_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
 
         // Get foliage data (offset 512 bytes from main tile data)
         match texture_mgr
@@ -1457,28 +2020,36 @@ impl World {
         {
             Ok(rgba_pixels) => {
                 // Foliage is 16 pixels high, 32 pixels wide
-                let width = 32u32;
-                let height = 16u32;
                 let expected_size = (width * height * 4) as usize;
 
                 if rgba_pixels.len() != expected_size {
+                    self.skipped_foliage_cache.borrow_mut().insert(cache_key);
                     return Ok(());
                 }
 
                 // Skip if all pixels are transparent
                 let has_visible_pixels = rgba_pixels.chunks(4).any(|p| p[3] > 0);
                 if !has_visible_pixels {
+                    self.skipped_foliage_cache.borrow_mut().insert(cache_key);
                     return Ok(());
                 }
 
                 let texture_id = format!("foliage_{}_{}", level_piece_id, block_index);
-                let cache_key = Self::tile_texture_cache_key(
-                    level_piece_id,
-                    block_index,
-                    1,
-                    self.render_debug.toon_filter,
-                );
-                let rect = Rect::new(screen_x, foliage_y, width, height);
+                if let Some(frame) = trace_frame {
+                    println!(
+                        "    [render-trace #{:06}] pass=foliage kind={:?} piece={} block={} dst=({}, {}) rect=({}, {}) size={}x{}",
+                        frame,
+                        TileTextureKind::Foliage,
+                        level_piece_id,
+                        block_index,
+                        screen_x,
+                        foliage_y,
+                        rect.x,
+                        rect.y,
+                        width,
+                        height
+                    );
+                }
                 engine
                     .draw_cached_rgba_texture(cache_key, rgba_pixels, width, height, rect)
                     .or_else(|_| {
@@ -1486,6 +2057,7 @@ impl World {
                     })?;
             }
             Err(_e) => {
+                self.skipped_foliage_cache.borrow_mut().insert(cache_key);
                 // Foliage decode failed, skip
             }
         }
@@ -1504,12 +2076,16 @@ impl World {
         screen_x: i32,
         screen_y: i32,
         is_floor: bool, // From SOL data: !TileHasAny(Solid | BlockMissile)
+        tile_props: crate::tiles::types::TileProperties,
         micro_x: i32,
         micro_y: i32,
+        trace_frame: Option<u64>,
     ) -> Result<()> {
         const TILE_HEIGHT: i32 = 32;
 
         let blocks_per_piece = texture_mgr.borrow().blocks_per_piece();
+        let transparency = tile_props.contains(crate::tiles::types::TileProperties::TRANSPARENT);
+        let mask_aware = self.render_debug.mask_aware_draw_cell;
 
         // Block 0 (left half)
         {
@@ -1537,8 +2113,12 @@ impl World {
                                     0,
                                     screen_x,
                                     screen_y,
+                                    trace_frame,
                                 );
                             } else {
+                                let mask =
+                                    DrawCellMask::first_left(tile_type, transparency, tile_props)
+                                        .enabled(mask_aware);
                                 // Render normal tile
                                 let _ = self.render_micro_tile(
                                     engine,
@@ -1549,6 +2129,8 @@ impl World {
                                     screen_y,
                                     micro_x,
                                     micro_y,
+                                    mask,
+                                    trace_frame,
                                 );
                             }
                         }
@@ -1582,8 +2164,12 @@ impl World {
                                     1,
                                     screen_x + 32,
                                     screen_y,
+                                    trace_frame,
                                 );
                             } else {
+                                let mask =
+                                    DrawCellMask::first_right(tile_type, transparency, tile_props)
+                                        .enabled(mask_aware);
                                 // Render normal tile
                                 let _ = self.render_micro_tile(
                                     engine,
@@ -1594,6 +2180,8 @@ impl World {
                                     screen_y,
                                     micro_x + 1,
                                     micro_y,
+                                    mask,
+                                    trace_frame,
                                 );
                             }
                         }
@@ -1619,6 +2207,8 @@ impl World {
                 y,
                 micro_x,
                 micro_y,
+                DrawCellMask::upper_block(transparency).enabled(mask_aware),
+                trace_frame,
             )?;
             if i + 1 < blocks_per_piece {
                 self.render_micro_tile(
@@ -1630,6 +2220,8 @@ impl World {
                     y,
                     micro_x + 1,
                     micro_y,
+                    DrawCellMask::upper_block(transparency).enabled(mask_aware),
+                    trace_frame,
                 )?;
             }
             y -= TILE_HEIGHT;
@@ -1652,26 +2244,80 @@ impl World {
         screen_y: i32,
         micro_x: i32,
         micro_y: i32,
+        mask: DrawCellMask,
+        trace_frame: Option<u64>,
     ) -> Result<()> {
+        self.render_micro_tile_with_kind(
+            engine,
+            texture_mgr,
+            level_piece_id,
+            block_index,
+            screen_x,
+            screen_y,
+            TileTextureKind::Normal,
+            None,
+            mask,
+            micro_x,
+            micro_y,
+            trace_frame,
+        )
+    }
+
+    fn render_floor_micro_tile(
+        &self,
+        engine: &mut Engine,
+        texture_mgr: &RefCell<TileTextureManager>,
+        level_piece_id: usize,
+        block_index: usize,
+        screen_x: i32,
+        screen_y: i32,
+        micro_x: i32,
+        micro_y: i32,
+        forced_tile_type: crate::tiles::types::TileType,
+        trace_frame: Option<u64>,
+    ) -> Result<()> {
+        self.render_micro_tile_with_kind(
+            engine,
+            texture_mgr,
+            level_piece_id,
+            block_index,
+            screen_x,
+            screen_y,
+            TileTextureKind::Floor,
+            Some(forced_tile_type),
+            DrawCellMask::Solid,
+            micro_x,
+            micro_y,
+            trace_frame,
+        )
+    }
+
+    fn render_micro_tile_with_kind(
+        &self,
+        engine: &mut Engine,
+        texture_mgr: &RefCell<TileTextureManager>,
+        level_piece_id: usize,
+        block_index: usize,
+        screen_x: i32,
+        screen_y: i32,
+        texture_kind: TileTextureKind,
+        forced_tile_type: Option<crate::tiles::types::TileType>,
+        mask: DrawCellMask,
+        micro_x: i32,
+        micro_y: i32,
+        trace_frame: Option<u64>,
+    ) -> Result<()> {
+        use crate::tiles::types::TileType;
+
         // Get tile type and dimensions (using immutable borrow)
-        let (width, height, tile_type_num) = {
+        let actual_tile_type = {
             let mgr = texture_mgr.borrow();
             if let Some(piece) = mgr.get_piece(level_piece_id) {
                 if let Some(block) = piece.mt.get(block_index) {
                     if !block.has_value() {
                         return Ok(()); // Empty block
                     }
-                    use crate::tiles::types::TileType;
-                    let tt = block.tile_type();
-                    let tt_num = tt as u8;
-                    match tt {
-                        TileType::LeftTriangle | TileType::RightTriangle => {
-                            (32u32, 31u32, tt_num) // Triangles are 32x31
-                        }
-                        _ => {
-                            (32u32, 32u32, tt_num) // Other types are 32x32
-                        }
-                    }
+                    block.tile_type()
                 } else {
                     return Ok(()); // No block
                 }
@@ -1679,6 +2325,45 @@ impl World {
                 return Ok(()); // No piece
             }
         };
+        let render_tile_type = forced_tile_type.unwrap_or(actual_tile_type);
+        let (actual_width, actual_height) = Self::tile_dimensions(actual_tile_type);
+        let (width, height) = Self::tile_dimensions(render_tile_type);
+        let cache_key = Self::tile_texture_cache_key(
+            level_piece_id,
+            block_index,
+            texture_kind,
+            mask,
+            self.render_debug.toon_filter,
+        );
+        let rect_y = screen_y - height as i32 + 1;
+        let rect = Rect::new(screen_x, rect_y, width, height);
+
+        if engine.draw_cached_texture(cache_key, rect)? {
+            MICRO_TEXTURE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            if let Some(frame) = trace_frame {
+                println!(
+                    "    [render-trace #{:06}] pass=micro-cache-hit kind={:?} dpiece=({}, {}) piece={} block={} actual={:?} forced={:?} render={:?} mask={:?} dst=({}, {}) rect=({}, {}) size={}x{}",
+                    frame,
+                    texture_kind,
+                    micro_x,
+                    micro_y,
+                    level_piece_id,
+                    block_index,
+                    actual_tile_type,
+                    forced_tile_type,
+                    render_tile_type,
+                    mask,
+                    screen_x,
+                    screen_y,
+                    rect.x,
+                    rect.y,
+                    width,
+                    height
+                );
+            }
+            return Ok(());
+        }
+        MICRO_TEXTURE_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
 
         // Get indexed pixels (using mutable borrow)
         let indexed_pixels_result = texture_mgr
@@ -1687,97 +2372,34 @@ impl World {
 
         match indexed_pixels_result {
             Ok(mut indexed_pixels) => {
-                let expected_indexed_size = (width * height) as usize;
-                if indexed_pixels.len() != expected_indexed_size {
+                let expected_actual_size = (actual_width * actual_height) as usize;
+                if indexed_pixels.len() != expected_actual_size {
                     return Ok(());
                 }
 
-                // Rearrange triangle pixels to match C++ rendering layout
-                use crate::tiles::types::TileType;
+                indexed_pixels =
+                    Self::rearrange_indexed_pixels_for_render(indexed_pixels, actual_tile_type);
 
-                if tile_type_num == TileType::LeftTriangle as u8 {
-                    // LeftTriangle: Rust decoder outputs left-aligned, C++ renders right-aligned
-                    // - Lower half (row 0-15): need to right-align (pixels at end of row)
-                    // - Upper half (row 16-30): need left-padding (offset from start)
-                    let mut rearranged = vec![0u8; indexed_pixels.len()];
-                    for row in 0..31usize {
-                        let row_start = row * 32;
-                        if row <= 15 {
-                            // Lower half: width = 2*(row+1), right-align
-                            let pixel_width = 2 * (row + 1);
-                            let offset = 32 - pixel_width;
-                            for i in 0..pixel_width {
-                                rearranged[row_start + offset + i] = indexed_pixels[row_start + i];
-                            }
-                        } else {
-                            // Upper half: left-pad with offset = 2*(row-15)
-                            let offset = 2 * (row - 15);
-                            let pixel_width = 32 - offset;
-                            for i in 0..pixel_width {
-                                rearranged[row_start + offset + i] = indexed_pixels[row_start + i];
-                            }
-                        }
+                if let Some(forced_tile_type) = forced_tile_type {
+                    if !matches!(
+                        forced_tile_type,
+                        TileType::LeftTriangle | TileType::RightTriangle
+                    ) {
+                        return Ok(());
                     }
-                    indexed_pixels = rearranged;
-                } else if tile_type_num == TileType::RightTriangle as u8 {
-                    // RightTriangle: Rust decoder outputs RIGHT-aligned, C++ renders LEFT-aligned
-                    // Need to move pixels from right side to left side of each row
-                    let mut rearranged = vec![0u8; indexed_pixels.len()];
-                    for row in 0..31usize {
-                        let row_start = row * 32;
-                        let pixel_width = if row <= 15 {
-                            2 * (row + 1) // 2, 4, 6, ..., 32
-                        } else {
-                            32 - 2 * (row - 15) // 30, 28, 26, ..., 2
-                        };
-                        // Rust decoder has pixels at the END of row (right-aligned)
-                        // C++ expects pixels at the START of row (left-aligned)
-                        let src_offset = 32 - pixel_width;
-                        for i in 0..pixel_width {
-                            rearranged[row_start + i] = indexed_pixels[row_start + src_offset + i];
-                        }
-                    }
-                    indexed_pixels = rearranged;
-                } else if tile_type_num == TileType::LeftTrapezoid as u8 {
-                    // LeftTrapezoid: lower half is rendered using LeftTriangleLower in C++,
-                    // which expects the triangle part to be right-aligned. Upper half is a
-                    // full-width rectangle and does not need reordering.
-                    let mut rearranged = vec![0u8; indexed_pixels.len()];
-                    for row in 0..32usize {
-                        let row_start = row * 32;
-                        if row <= 15 {
-                            let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
-                            let offset = 32 - pixel_width;
-                            rearranged[row_start + offset..row_start + offset + pixel_width]
-                                .copy_from_slice(
-                                    &indexed_pixels[row_start..row_start + pixel_width],
-                                );
-                        } else {
-                            rearranged[row_start..row_start + 32]
-                                .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
-                        }
-                    }
-                    indexed_pixels = rearranged;
-                } else if tile_type_num == TileType::RightTrapezoid as u8 {
-                    // RightTrapezoid: lower half is rendered using RightTriangleLower in C++,
-                    // which expects the triangle part to be left-aligned. Upper half is a
-                    // full-width rectangle and does not need reordering.
-                    let mut rearranged = vec![0u8; indexed_pixels.len()];
-                    for row in 0..32usize {
-                        let row_start = row * 32;
-                        if row <= 15 {
-                            let pixel_width = 2 * (row + 1); // 2, 4, 6, ..., 32
-                            let src_offset = 32 - pixel_width;
-                            rearranged[row_start..row_start + pixel_width].copy_from_slice(
-                                &indexed_pixels
-                                    [row_start + src_offset..row_start + src_offset + pixel_width],
-                            );
-                        } else {
-                            rearranged[row_start..row_start + 32]
-                                .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
-                        }
-                    }
-                    indexed_pixels = rearranged;
+                    indexed_pixels = Self::extract_floor_triangle_pixels(
+                        &indexed_pixels,
+                        actual_width as usize,
+                        actual_height as usize,
+                        forced_tile_type,
+                    );
+                    indexed_pixels =
+                        Self::rearrange_indexed_pixels_for_render(indexed_pixels, forced_tile_type);
+                }
+
+                let expected_indexed_size = (width * height) as usize;
+                if indexed_pixels.len() != expected_indexed_size {
+                    return Ok(());
                 }
 
                 // Convert indexed pixels to RGBA using palette
@@ -1791,6 +2413,12 @@ impl World {
                 }
 
                 let mut rgba_pixels = rgba_pixels;
+                Self::apply_draw_cell_mask_to_rgba(
+                    &mut rgba_pixels,
+                    width as usize,
+                    height as usize,
+                    mask,
+                );
 
                 // Skip if all pixels are transparent.
                 // This prevents doing toon edge detection on fully transparent tiles.
@@ -1809,17 +2437,34 @@ impl World {
                     );
                 }
 
-                let texture_id = format!("tile_{}_{}", level_piece_id, block_index);
-                let cache_key = Self::tile_texture_cache_key(
+                let texture_id = format!(
+                    "tile_{}_{}_{}_{}",
+                    texture_kind.texture_id_fragment(),
                     level_piece_id,
                     block_index,
-                    0,
-                    self.render_debug.toon_filter,
+                    mask.cache_index()
                 );
-                // screen_y is the BOTTOM of the tile (like C++ position.y)
-                // But Rect::new expects TOP-LEFT corner, so convert
-                let rect_y = screen_y - height as i32 + 1;
-                let rect = Rect::new(screen_x, rect_y, width, height);
+                if let Some(frame) = trace_frame {
+                    println!(
+                        "    [render-trace #{:06}] pass=micro kind={:?} dpiece=({}, {}) piece={} block={} actual={:?} forced={:?} render={:?} mask={:?} dst=({}, {}) rect=({}, {}) size={}x{}",
+                        frame,
+                        texture_kind,
+                        micro_x,
+                        micro_y,
+                        level_piece_id,
+                        block_index,
+                        actual_tile_type,
+                        forced_tile_type,
+                        render_tile_type,
+                        mask,
+                        screen_x,
+                        screen_y,
+                        rect.x,
+                        rect.y,
+                        width,
+                        height
+                    );
+                }
 
                 engine
                     .draw_cached_rgba_texture(cache_key, &rgba_pixels, width, height, rect)
@@ -1832,6 +2477,209 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    fn tile_dimensions(tile_type: crate::tiles::types::TileType) -> (u32, u32) {
+        use crate::tiles::types::TileType;
+
+        match tile_type {
+            TileType::LeftTriangle | TileType::RightTriangle => (32, 31),
+            _ => (32, 32),
+        }
+    }
+
+    fn rearrange_indexed_pixels_for_render(
+        indexed_pixels: Vec<u8>,
+        tile_type: crate::tiles::types::TileType,
+    ) -> Vec<u8> {
+        use crate::tiles::types::TileType;
+
+        match tile_type {
+            TileType::LeftTriangle => {
+                if indexed_pixels.len() != 32 * 31 {
+                    return indexed_pixels;
+                }
+                let mut rearranged = vec![0u8; indexed_pixels.len()];
+                for row in 0..31usize {
+                    let row_start = row * 32;
+                    let pixel_width = Self::triangle_row_width(row);
+                    let offset = 32 - pixel_width;
+                    rearranged[row_start + offset..row_start + offset + pixel_width]
+                        .copy_from_slice(&indexed_pixels[row_start..row_start + pixel_width]);
+                }
+                rearranged
+            }
+            TileType::RightTriangle => {
+                if indexed_pixels.len() != 32 * 31 {
+                    return indexed_pixels;
+                }
+                let mut rearranged = vec![0u8; indexed_pixels.len()];
+                for row in 0..31usize {
+                    let row_start = row * 32;
+                    let pixel_width = Self::triangle_row_width(row);
+                    let src_offset = 32 - pixel_width;
+                    rearranged[row_start..row_start + pixel_width].copy_from_slice(
+                        &indexed_pixels
+                            [row_start + src_offset..row_start + src_offset + pixel_width],
+                    );
+                }
+                rearranged
+            }
+            TileType::LeftTrapezoid => {
+                if indexed_pixels.len() != 32 * 32 {
+                    return indexed_pixels;
+                }
+                let mut rearranged = vec![0u8; indexed_pixels.len()];
+                for row in 0..32usize {
+                    let row_start = row * 32;
+                    if row <= 15 {
+                        let pixel_width = 2 * (row + 1);
+                        let offset = 32 - pixel_width;
+                        rearranged[row_start + offset..row_start + offset + pixel_width]
+                            .copy_from_slice(&indexed_pixels[row_start..row_start + pixel_width]);
+                    } else {
+                        rearranged[row_start..row_start + 32]
+                            .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                    }
+                }
+                rearranged
+            }
+            TileType::RightTrapezoid => {
+                if indexed_pixels.len() != 32 * 32 {
+                    return indexed_pixels;
+                }
+                let mut rearranged = vec![0u8; indexed_pixels.len()];
+                for row in 0..32usize {
+                    let row_start = row * 32;
+                    if row <= 15 {
+                        let pixel_width = 2 * (row + 1);
+                        let src_offset = 32 - pixel_width;
+                        rearranged[row_start..row_start + pixel_width].copy_from_slice(
+                            &indexed_pixels
+                                [row_start + src_offset..row_start + src_offset + pixel_width],
+                        );
+                    } else {
+                        rearranged[row_start..row_start + 32]
+                            .copy_from_slice(&indexed_pixels[row_start..row_start + 32]);
+                    }
+                }
+                rearranged
+            }
+            TileType::Square | TileType::TransparentSquare => indexed_pixels,
+        }
+    }
+
+    fn triangle_row_width(row: usize) -> usize {
+        if row <= 15 {
+            2 * (row + 1)
+        } else {
+            32 - 2 * (row - 15)
+        }
+    }
+
+    fn extract_floor_triangle_pixels(
+        source: &[u8],
+        source_width: usize,
+        source_height: usize,
+        forced_tile_type: crate::tiles::types::TileType,
+    ) -> Vec<u8> {
+        use crate::tiles::types::TileType;
+
+        let mut output = vec![0u8; 32 * 31];
+        if source_width != 32 || source_height < 31 || source.len() < source_width * source_height {
+            return output;
+        }
+
+        for row in 0..31usize {
+            let pixel_width = Self::triangle_row_width(row);
+            let source_row = row * source_width;
+            let dest_row = row * 32;
+            match forced_tile_type {
+                TileType::LeftTriangle => {
+                    let src_start = source_row + 32 - pixel_width;
+                    output[dest_row..dest_row + pixel_width]
+                        .copy_from_slice(&source[src_start..src_start + pixel_width]);
+                }
+                TileType::RightTriangle => {
+                    let src_start = source_row;
+                    let dest_start = dest_row + 32 - pixel_width;
+                    output[dest_start..dest_start + pixel_width]
+                        .copy_from_slice(&source[src_start..src_start + pixel_width]);
+                }
+                _ => {}
+            }
+        }
+
+        output
+    }
+
+    fn apply_draw_cell_mask_to_rgba(
+        pixels: &mut [u8],
+        width: usize,
+        height: usize,
+        mask: DrawCellMask,
+    ) {
+        if mask == DrawCellMask::Solid {
+            return;
+        }
+
+        let expected = width
+            .checked_mul(height)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(0);
+        if expected == 0 || pixels.len() != expected {
+            return;
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                let alpha_idx = (y * width + x) * 4 + 3;
+                if pixels[alpha_idx] == 0 {
+                    continue;
+                }
+
+                let masked = match mask {
+                    DrawCellMask::Solid => false,
+                    DrawCellMask::Transparent => true,
+                    DrawCellMask::Left => Self::is_left_mask_pixel(x, y, width, height),
+                    DrawCellMask::Right => Self::is_right_mask_pixel(x, y, width, height),
+                };
+
+                if masked {
+                    pixels[alpha_idx] = DrawCellMask::TRANSPARENT_ALPHA;
+                }
+            }
+        }
+    }
+
+    fn is_left_mask_pixel(x: usize, y: usize, width: usize, height: usize) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+
+        let upper_start = height.saturating_sub(16);
+        if y < upper_start {
+            return false;
+        }
+
+        let upper_row = y - upper_start;
+        let opaque_width = ((upper_row + 1) * 2).min(width);
+        x < width.saturating_sub(opaque_width)
+    }
+
+    fn is_right_mask_pixel(x: usize, y: usize, width: usize, height: usize) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+
+        let upper_start = height.saturating_sub(16);
+        if y < upper_start {
+            return false;
+        }
+
+        let upper_row = y - upper_start;
+        let opaque_width = ((upper_row + 1) * 2).min(width);
+        x >= opaque_width
     }
 
     /// Apply a simple toon/comic post-process to a tile's RGBA buffer.
@@ -1929,18 +2777,6 @@ impl World {
 }
 
 impl World {
-    /// Draw a black tile (for out-of-bounds areas)
-    /// Reference: Source/engine/render/scrollrt.cpp::world_draw_black_tile()
-    fn draw_black_tile(&self, engine: &mut Engine, screen_x: i32, screen_y: i32) -> Result<()> {
-        // Draw a 64x32 black rectangle (isometric tile area)
-        let sdl_rect = sdl2::rect::Rect::new(screen_x, screen_y, 64, 32);
-        engine
-            .canvas_mut()
-            .set_draw_color(sdl2::pixels::Color::RGB(0, 0, 0));
-        engine.canvas_mut().fill_rect(sdl_rect).ok();
-        Ok(())
-    }
-
     /// Render player sprite at screen center
     fn render_player_sprite(
         &self,

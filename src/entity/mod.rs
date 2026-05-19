@@ -359,6 +359,18 @@ impl Entity {
         }
     }
 
+    /// Adjust walk animation timing for live movement tuning.
+    pub fn set_walk_frame_duration(&mut self, duration: f32) {
+        if let Some(ref mut anim) = self.animation {
+            anim.set_frame_duration_for_state(AnimationState::Walk, duration);
+            if self.walking {
+                self.walk_duration = anim
+                    .current_animation_duration()
+                    .unwrap_or(Self::DEFAULT_WALK_DURATION);
+            }
+        }
+    }
+
     /// Return the original Diablo-style isometric walking offset.
     pub fn walking_render_offset(&self) -> Point {
         if !self.walking {

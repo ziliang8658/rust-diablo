@@ -26,6 +26,11 @@ use sdl2::render::{Texture as SdlTexture, TextureCreator};
 use sdl2::video::WindowContext;
 use sdl2::Sdl;
 
+/// Default gameplay viewport width.
+pub const DEFAULT_SCREEN_WIDTH: u32 = 640;
+/// Default gameplay viewport height without Diablo's bottom control panel.
+pub const DEFAULT_SCREEN_HEIGHT: u32 = 352;
+
 /// Engine structure that manages SDL2 and rendering
 pub struct Engine {
     sdl_context: Sdl,
@@ -36,14 +41,14 @@ pub struct Engine {
 
     /// Tile texture cache for dungeon tile rendering
     /// Uses separate cache from general texture_manager for better organization
-    tile_texture_cache: Option<TextureCache<'static>>,
+    tile_texture_cache: Option<TextureCache>,
 }
 
 impl Engine {
     /// Create a new engine instance
     ///
     /// Initializes SDL2, creates a window, and sets up rendering.
-    /// Window size matches Diablo's original resolution: 640x480
+    /// Window size matches the default gameplay viewport.
     pub fn new() -> Result<Self> {
         // Initialize SDL2
         let sdl_context =
@@ -60,9 +65,8 @@ impl Engine {
             .map_err(|e| anyhow::anyhow!("Failed to initialize SDL2 video subsystem: {}", e))?;
 
         // Create window
-        // Diablo's original resolution was 640x480
         let window = video_subsystem
-            .window("Rust Diablo", 640, 480)
+            .window("Rust Diablo", DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT)
             .position_centered()
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create window: {}", e))?;
@@ -76,6 +80,8 @@ impl Engine {
         // Create canvas for rendering
         let canvas = window
             .into_canvas()
+            .accelerated()
+            .present_vsync()
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create canvas: {}", e))?;
 
@@ -91,12 +97,7 @@ impl Engine {
         };
 
         // Create tile texture cache for dungeon tile rendering
-        // Safety: tile_texture_cache and texture_creator both live for the duration of Engine
-        let tile_texture_cache = Some(unsafe {
-            std::mem::transmute::<TextureCache, TextureCache<'static>>(TextureCache::new(
-                &texture_creator,
-            ))
-        });
+        let tile_texture_cache = Some(TextureCache::new());
 
         Ok(Self {
             sdl_context,
@@ -131,10 +132,18 @@ impl Engine {
     /// Get mutable tile texture cache reference
     ///
     /// Used for caching dungeon tile textures during rendering.
-    pub fn tile_texture_cache_mut(&mut self) -> &mut TextureCache<'static> {
+    pub fn tile_texture_cache_mut(&mut self) -> &mut TextureCache {
         self.tile_texture_cache
             .as_mut()
             .expect("Tile texture cache should always be initialized")
+    }
+
+    /// Get current tile texture cache statistics.
+    pub fn tile_texture_cache_stats(&self) -> (usize, usize) {
+        self.tile_texture_cache
+            .as_ref()
+            .map(TextureCache::stats)
+            .unwrap_or((0, 0))
     }
 
     /// Create SDL texture from CLX frame
@@ -325,9 +334,39 @@ impl Engine {
         let sdl_rect =
             sdl2::rect::Rect::new(dst_rect.x, dst_rect.y, dst_rect.width, dst_rect.height);
         let texture_ptr = {
+            let texture_creator = &self.texture_creator;
             let texture = self
-                .tile_texture_cache_mut()
-                .get_or_create_texture(cache_key, rgba_data, width, height)?;
+                .tile_texture_cache
+                .as_mut()
+                .expect("Tile texture cache should always be initialized")
+                .get_or_create_texture(texture_creator, cache_key, rgba_data, width, height)?;
+            texture as *const SdlTexture
+        };
+
+        unsafe {
+            self.canvas
+                .copy_ex(&*texture_ptr, None, sdl_rect, 0.0, None, false, true)
+                .map_err(|e| anyhow::anyhow!("Failed to copy cached texture: {}", e))?;
+        }
+
+        Ok(true)
+    }
+
+    /// Draw a previously cached dungeon tile texture without rebuilding RGBA pixels.
+    pub fn draw_cached_texture(
+        &mut self,
+        cache_key: usize,
+        dst_rect: crate::math::Rect,
+    ) -> Result<bool> {
+        let sdl_rect =
+            sdl2::rect::Rect::new(dst_rect.x, dst_rect.y, dst_rect.width, dst_rect.height);
+        let texture_ptr = {
+            let Some(texture_cache) = self.tile_texture_cache.as_ref() else {
+                return Ok(false);
+            };
+            let Some(texture) = texture_cache.get_texture(cache_key) else {
+                return Ok(false);
+            };
             texture as *const SdlTexture
         };
 

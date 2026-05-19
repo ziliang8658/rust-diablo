@@ -23,6 +23,15 @@ pub struct RenderDebugFlags {
     pub log_render_focus: bool,
     /// Enable toon/comic post-processing on tiles
     pub toon_filter: bool,
+    /// Apply Diablo DrawCell mask rules before uploading tile pixels.
+    pub mask_aware_draw_cell: bool,
+    /// Apply Diablo-style walking camera offset while the player is stepping.
+    /// Still opt-in while the Rust tile scan is being stabilized.
+    pub walking_camera_offset: bool,
+    /// Log per-frame walk timing and offset diagnostics.
+    pub log_walk_trace: bool,
+    /// Enable x-axis wall pre-draw used to hide moving sprites behind walls.
+    pub wall_predraw: bool,
 }
 
 impl Default for RenderDebugFlags {
@@ -36,6 +45,10 @@ impl Default for RenderDebugFlags {
             focus_render_2x2: false,
             log_render_focus: false,
             toon_filter: false,
+            mask_aware_draw_cell: true,
+            walking_camera_offset: false,
+            log_walk_trace: false,
+            wall_predraw: true,
         }
     }
 }
@@ -51,6 +64,10 @@ impl RenderDebugFlags {
             focus_render_2x2: false,
             log_render_focus: false,
             toon_filter: false,
+            mask_aware_draw_cell: true,
+            walking_camera_offset: false,
+            log_walk_trace: false,
+            wall_predraw: true,
         }
     }
 
@@ -64,6 +81,10 @@ impl RenderDebugFlags {
             focus_render_2x2: false,
             log_render_focus: false,
             toon_filter: false,
+            mask_aware_draw_cell: true,
+            walking_camera_offset: false,
+            log_walk_trace: false,
+            wall_predraw: true,
         }
     }
 
@@ -77,6 +98,10 @@ impl RenderDebugFlags {
             focus_render_2x2: false,
             log_render_focus: false,
             toon_filter: false,
+            mask_aware_draw_cell: true,
+            walking_camera_offset: false,
+            log_walk_trace: false,
+            wall_predraw: true,
         }
     }
 }

@@ -1,6 +1,5 @@
 use crate::debug::RenderDebugFlags;
-use crate::engine::Direction;
-use crate::engine::Engine;
+use crate::engine::{Direction, Engine, DEFAULT_SCREEN_HEIGHT, DEFAULT_SCREEN_WIDTH};
 use crate::entity::Entity;
 use crate::math::{Point, Rect};
 use crate::renderer::Camera;
@@ -14,6 +13,20 @@ use crate::world::{SimpleTown, World};
 /// It's the central coordinator for all game systems.
 use anyhow::{Context, Result};
 use std::time::Instant;
+
+// Diablo's normal game speed is 20Hz and walk uses one tick per frame.
+const DEFAULT_WALK_FRAME_DURATION: f32 = 0.05;
+const WALK_FRAME_DURATION_STEP: f32 = 0.01;
+const MIN_WALK_FRAME_DURATION: f32 = 0.05;
+const MAX_WALK_FRAME_DURATION: f32 = 0.20;
+const WALK_UPDATE_DT_CAP: f32 = 0.10;
+const WALK_TRACE_SAMPLE_INTERVAL: u64 = 8;
+const MOUSE_WALK_DEADZONE_PX: i32 = 24;
+const RENDER_FPS_REPORT_INTERVAL_SECS: f32 = 1.0;
+
+fn capped_walk_update_dt(raw_dt: f32) -> f32 {
+    raw_dt.min(WALK_UPDATE_DT_CAP)
+}
 
 /// Create simple test dungeon data with controlled frame indices
 ///
@@ -201,7 +214,7 @@ fn load_directional_player_animation_set(
             anim_controller.add_directional_animation(
                 AnimationState::Walk,
                 *direction,
-                Animation::new(walk_frames, 0.1, false),
+                Animation::new(walk_frames, DEFAULT_WALK_FRAME_DURATION, false),
             );
         }
 
@@ -242,6 +255,8 @@ pub struct Game {
     key_down: bool,
     key_left: bool,
     key_right: bool,
+    mouse_walk_active: bool,
+    mouse_position: Point,
 
     // Step 5.3: Scene system and resource manager
     resource_manager: Option<ResourceManager>,
@@ -250,6 +265,14 @@ pub struct Game {
 
     // Render debug flags (for controlling rendering phases)
     render_debug: RenderDebugFlags,
+
+    // Live movement tuning.
+    walk_frame_duration: f32,
+    walk_trace_frame: u64,
+
+    // Actual presented-frame counter.
+    render_frame_count: u64,
+    render_fps_last_report: Instant,
 }
 
 impl Game {
@@ -317,12 +340,13 @@ impl Game {
         // Create player at center (tile coordinates)
         let center_tile_x = (map_width / 2) as i32;
         let center_tile_y = (map_height / 2) as i32;
-        let player = Entity::create_player(Point::new(center_tile_x, center_tile_y));
+        let mut player = Entity::create_player(Point::new(center_tile_x, center_tile_y));
+        player.set_walk_frame_duration(DEFAULT_WALK_FRAME_DURATION);
         world.add_entity(player);
         let player_index = 0;
 
         // Create camera
-        let mut camera = Camera::new(640, 480);
+        let mut camera = Camera::new(DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT);
         // Set camera bounds to map size
         camera.set_bounds(Rect::new(
             0,
@@ -805,10 +829,16 @@ impl Game {
             key_down: false,
             key_left: false,
             key_right: false,
+            mouse_walk_active: false,
+            mouse_position: Point::zero(),
             resource_manager: resource_manager_opt,
             town_scene: town_scene_opt,
             current_scene: SceneType::TestWorld, // Start with test world
             render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
+            walk_frame_duration: DEFAULT_WALK_FRAME_DURATION,
+            walk_trace_frame: 0,
+            render_frame_count: 0,
+            render_fps_last_report: Instant::now(),
         })
     }
 
@@ -894,6 +924,16 @@ impl Game {
             }
             sdl2::keyboard::Keycode::D | sdl2::keyboard::Keycode::Right => {
                 self.key_right = true;
+            }
+            // Movement tuning: PageUp speeds the walk up, PageDown slows it down.
+            sdl2::keyboard::Keycode::PageUp => {
+                self.adjust_walk_frame_duration(-WALK_FRAME_DURATION_STEP);
+            }
+            sdl2::keyboard::Keycode::PageDown => {
+                self.adjust_walk_frame_duration(WALK_FRAME_DURATION_STEP);
+            }
+            sdl2::keyboard::Keycode::Home => {
+                self.set_walk_frame_duration(DEFAULT_WALK_FRAME_DURATION);
             }
             // Step 5.3 & 6.1: Scene switching
             sdl2::keyboard::Keycode::F1 => {
@@ -1003,6 +1043,66 @@ impl Game {
                 self.print_render_debug_status();
                 self.world.render_debug = self.render_debug.clone();
             }
+            // Render Debug: Toggle walking camera offset
+            sdl2::keyboard::Keycode::F11 => {
+                let shift = keymod
+                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
+
+                if shift {
+                    self.render_debug.log_walk_trace = !self.render_debug.log_walk_trace;
+                    println!(
+                        "\n=== Movement Debug: Walk Trace {} ===",
+                        if self.render_debug.log_walk_trace {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                } else {
+                    self.render_debug.walking_camera_offset =
+                        !self.render_debug.walking_camera_offset;
+                    println!(
+                        "\n=== Render Debug: Walking Camera Offset {} ===",
+                        if self.render_debug.walking_camera_offset {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                }
+                self.print_render_debug_status();
+                self.world.render_debug = self.render_debug.clone();
+            }
+            // Render Debug: Toggle x-axis wall pre-draw
+            sdl2::keyboard::Keycode::F12 => {
+                let shift = keymod
+                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
+
+                if shift {
+                    self.render_debug.mask_aware_draw_cell =
+                        !self.render_debug.mask_aware_draw_cell;
+                    println!(
+                        "\n=== Render Debug: Mask-aware DrawCell {} ===",
+                        if self.render_debug.mask_aware_draw_cell {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                } else {
+                    self.render_debug.wall_predraw = !self.render_debug.wall_predraw;
+                    println!(
+                        "\n馃帹 === Render Debug: Wall Pre-draw {} ===",
+                        if self.render_debug.wall_predraw {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    );
+                }
+                self.print_render_debug_status();
+                self.world.render_debug = self.render_debug.clone();
+            }
             // Render Debug: Reset All Layers
             sdl2::keyboard::Keycode::F8 => {
                 self.render_debug = RenderDebugFlags {
@@ -1013,6 +1113,10 @@ impl Game {
                     focus_render_2x2: false,
                     log_render_focus: false,
                     toon_filter: false,
+                    mask_aware_draw_cell: true,
+                    walking_camera_offset: false,
+                    log_walk_trace: false,
+                    wall_predraw: true,
                 };
                 println!("\n🎨 === Render Debug: All Layers RESET (All Enabled) ===");
                 self.print_render_debug_status();
@@ -1051,23 +1155,47 @@ impl Game {
     }
 
     /// Handle mouse movement
-    fn handle_mouse_motion(&mut self, _x: i32, _y: i32) {
-        // Placeholder for future mouse handling
+    fn handle_mouse_motion(&mut self, x: i32, y: i32) {
+        self.mouse_position = Point::new(x, y);
     }
 
     /// Handle mouse button press
-    fn handle_mouse_down(&mut self, _button: sdl2::mouse::MouseButton, _x: i32, _y: i32) {
-        // Placeholder for future mouse handling
+    fn handle_mouse_down(&mut self, button: sdl2::mouse::MouseButton, x: i32, y: i32) {
+        self.mouse_position = Point::new(x, y);
+        if button == sdl2::mouse::MouseButton::Left {
+            self.mouse_walk_active = true;
+        }
     }
 
     /// Handle mouse button release
-    fn handle_mouse_up(&mut self, _button: sdl2::mouse::MouseButton, _x: i32, _y: i32) {
-        // Placeholder for future mouse handling
+    fn handle_mouse_up(&mut self, button: sdl2::mouse::MouseButton, x: i32, y: i32) {
+        self.mouse_position = Point::new(x, y);
+        if button == sdl2::mouse::MouseButton::Left {
+            self.mouse_walk_active = false;
+        }
+    }
+
+    fn adjust_walk_frame_duration(&mut self, delta: f32) {
+        self.set_walk_frame_duration(self.walk_frame_duration + delta);
+    }
+
+    fn set_walk_frame_duration(&mut self, duration: f32) {
+        self.walk_frame_duration = duration.clamp(MIN_WALK_FRAME_DURATION, MAX_WALK_FRAME_DURATION);
+
+        if let Some(player) = self.world.get_entity_mut(self.player_index) {
+            player.set_walk_frame_duration(self.walk_frame_duration);
+        }
+
+        println!(
+            "[movement] walk frame duration = {:.2}s, estimated 8-frame step = {:.2}s (PageUp faster, PageDown slower, Home reset to 20Hz original-ish)",
+            self.walk_frame_duration,
+            self.walk_frame_duration * 8.0
+        );
     }
 
     /// Return the direction currently requested by held movement keys.
     fn current_input_direction(&self) -> Direction {
-        if self.key_up && self.key_left {
+        let keyboard_direction = if self.key_up && self.key_left {
             Direction::NorthWest
         } else if self.key_up && self.key_right {
             Direction::NorthEast
@@ -1085,7 +1213,30 @@ impl Game {
             Direction::East
         } else {
             Direction::None
+        };
+
+        if keyboard_direction.is_moving() {
+            return keyboard_direction;
         }
+
+        if self.mouse_walk_active {
+            self.mouse_walk_direction()
+        } else {
+            Direction::None
+        }
+    }
+
+    fn mouse_walk_direction(&self) -> Direction {
+        let center_x = self.camera.viewport_width as i32 / 2;
+        let center_y = self.camera.viewport_height as i32 / 2;
+        let dx = self.mouse_position.x - center_x;
+        let dy = self.mouse_position.y - center_y;
+
+        if dx * dx + dy * dy < MOUSE_WALK_DEADZONE_PX * MOUSE_WALK_DEADZONE_PX {
+            return Direction::None;
+        }
+
+        Direction::from_velocity(dx as f32, dy as f32)
     }
 
     /// Try to start one tile step for the player.
@@ -1182,6 +1333,38 @@ impl Game {
                 "OFF"
             }
         );
+        println!(
+            "│ DrawCell Mask (S+F12): {:5} │",
+            if self.render_debug.mask_aware_draw_cell {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
+        println!(
+            "│ Walk Camera (F11):    {:5} │",
+            if self.render_debug.walking_camera_offset {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
+        println!(
+            "│ Walk Trace (S+F11):   {:5} │",
+            if self.render_debug.log_walk_trace {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
+        println!(
+            "│ Wall Pre-draw (F12):  {:5} │",
+            if self.render_debug.wall_predraw {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
         println!("│ Reset All (F8)                  │");
         println!("│ Floor Only (F9)                 │");
         println!("└─────────────────────────────────┘");
@@ -1197,25 +1380,32 @@ impl Game {
     fn update(&mut self) -> Result<()> {
         // Calculate delta time
         let current_time = Instant::now();
-        let dt = current_time
+        let raw_dt = current_time
             .duration_since(self.last_frame_time)
             .as_secs_f32();
         self.last_frame_time = current_time;
+        let update_dt = capped_walk_update_dt(raw_dt);
 
         let direction = self.current_input_direction();
+        let was_walking_before_update = self
+            .world
+            .entities()
+            .get(self.player_index)
+            .map(|player| player.walking)
+            .unwrap_or(false);
 
         // Start from idle immediately, preserving the existing responsive input feel.
-        self.try_start_player_walk(direction);
+        let started_before_update = self.try_start_player_walk(direction);
 
         // Update world (includes tile-based entity updates)
         match self.current_scene {
             SceneType::TestWorld => {
                 // Use normal world update with tile collision
-                self.world.update(dt);
+                self.world.update(update_dt);
             }
             SceneType::TownPreview => {
                 // For town scene, update world (tile-based movement)
-                self.world.update(dt);
+                self.world.update(update_dt);
                 // Town-specific collision is now handled in World::update()
             }
         }
@@ -1224,7 +1414,16 @@ impl Game {
         // `CheckNewPath()` in the same player-processing tick before rendering.
         // If movement input is still held, start the next step here so the
         // rendered frame stays in Walk instead of briefly flashing Idle.
-        self.try_start_player_walk(direction);
+        let started_after_update = self.try_start_player_walk(direction);
+
+        self.log_walk_trace(
+            raw_dt,
+            update_dt,
+            direction,
+            was_walking_before_update,
+            started_before_update,
+            started_after_update,
+        );
 
         // Update camera to follow player (convert tile position to pixel position)
         let tile_size = self.world.tile_size;
@@ -1255,6 +1454,85 @@ impl Game {
         Ok(())
     }
 
+    fn log_walk_trace(
+        &mut self,
+        raw_dt: f32,
+        update_dt: f32,
+        input_direction: Direction,
+        was_walking_before_update: bool,
+        started_before_update: bool,
+        started_after_update: bool,
+    ) {
+        if !self.render_debug.log_walk_trace {
+            return;
+        }
+
+        let Some(player) = self.world.entities().get(self.player_index) else {
+            return;
+        };
+
+        let transition = was_walking_before_update != player.walking
+            || started_before_update
+            || started_after_update;
+
+        self.walk_trace_frame += 1;
+        if !transition && self.walk_trace_frame % WALK_TRACE_SAMPLE_INTERVAL != 0 {
+            return;
+        }
+
+        if !player.walking
+            && !was_walking_before_update
+            && !input_direction.is_moving()
+            && !started_before_update
+            && !started_after_update
+        {
+            return;
+        }
+
+        let frame_index = player
+            .animation
+            .as_ref()
+            .and_then(|anim| anim.current_frame_index())
+            .unwrap_or(0);
+        let animation_progress = player
+            .animation
+            .as_ref()
+            .and_then(|anim| anim.current_animation_progress())
+            .unwrap_or(0.0);
+        let walking_offset = player.walking_render_offset();
+
+        println!(
+            "[walk-trace #{:06}] raw_dt={:.4} update_dt={:.4} input={:?} mouse={} mouse_pos=({}, {}) was_walking={} start_pre={} start_post={} walking={} frame={} anim_prog={:.3} walk_prog={:.3} offset=({}, {}) tile=({}, {}) start={:?} target={:?} walk_dur={:.3} frame_dur={:.3} cam={}",
+            self.walk_trace_frame,
+            raw_dt,
+            update_dt,
+            input_direction,
+            self.mouse_walk_active,
+            self.mouse_position.x,
+            self.mouse_position.y,
+            was_walking_before_update,
+            started_before_update,
+            started_after_update,
+            player.walking,
+            frame_index,
+            animation_progress,
+            player.walking_progress(),
+            walking_offset.x,
+            walking_offset.y,
+            player.tile_position.x,
+            player.tile_position.y,
+            player.walk_start_tile,
+            player.walk_target_tile,
+            player.walk_duration,
+            self.walk_frame_duration,
+            if self.render_debug.walking_camera_offset {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
+    }
+
     /// Render the current frame
     ///
     /// This is where all rendering happens:
@@ -1281,7 +1559,38 @@ impl Game {
         }
 
         self.engine.present();
+        self.log_render_fps();
         Ok(())
+    }
+
+    fn log_render_fps(&mut self) {
+        self.render_frame_count += 1;
+        let elapsed = self.render_fps_last_report.elapsed();
+        let seconds = elapsed.as_secs_f32();
+
+        if seconds < RENDER_FPS_REPORT_INTERVAL_SECS {
+            return;
+        }
+
+        let frames = self.render_frame_count;
+        let fps = frames as f32 / seconds;
+        let avg_frame_ms = seconds * 1000.0 / frames as f32;
+
+        println!(
+            "[render-fps] frames={} seconds={:.2} fps={:.1} avg_frame_ms={:.2} scene={:?} focus={} trace={} cam={} mask={}",
+            frames,
+            seconds,
+            fps,
+            avg_frame_ms,
+            self.current_scene,
+            self.render_debug.focus_render_2x2,
+            self.render_debug.log_render_focus,
+            self.render_debug.walking_camera_offset,
+            self.render_debug.mask_aware_draw_cell
+        );
+
+        self.render_frame_count = 0;
+        self.render_fps_last_report = Instant::now();
     }
 
     /// Switch to a different scene
@@ -1383,5 +1692,20 @@ impl Game {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walking_update_dt_keeps_common_slow_frames_realtime() {
+        assert_eq!(capped_walk_update_dt(0.062), 0.062);
+    }
+
+    #[test]
+    fn walking_update_dt_still_caps_long_stalls() {
+        assert_eq!(capped_walk_update_dt(0.250), WALK_UPDATE_DT_CAP);
     }
 }

@@ -224,6 +224,15 @@ impl AnimationController {
         self.current_animation().map(|anim| anim.duration())
     }
 
+    /// Set frame duration for every direction in one animation state.
+    pub fn set_frame_duration_for_state(&mut self, state: AnimationState, duration: f32) {
+        for ((animation_state, _), animation) in self.animations.iter_mut() {
+            if *animation_state == state {
+                animation.set_frame_duration(duration);
+            }
+        }
+    }
+
     /// Get the current animation progress.
     pub fn current_animation_progress(&self) -> Option<f32> {
         self.current_animation().map(|anim| anim.progress())

@@ -25,19 +25,14 @@ use std::collections::HashMap;
 ///
 /// Manages creation and caching of SDL2 textures from RGBA pixel data.
 /// Textures are cached by a unique identifier to avoid redundant uploads to GPU.
-pub struct TextureCache<'a> {
-    texture_creator: &'a TextureCreator<WindowContext>,
-    cache: HashMap<usize, Texture<'a>>,
+pub struct TextureCache {
+    cache: HashMap<usize, Texture<'static>>,
 }
 
-impl<'a> TextureCache<'a> {
+impl TextureCache {
     /// Create a new texture cache
-    ///
-    /// # Arguments
-    /// * `texture_creator` - SDL2 texture creator (must outlive the cache)
-    pub fn new(texture_creator: &'a TextureCreator<WindowContext>) -> Self {
+    pub fn new() -> Self {
         Self {
-            texture_creator,
             cache: HashMap::new(),
         }
     }
@@ -60,17 +55,17 @@ impl<'a> TextureCache<'a> {
     /// Original: Source/engine/render/dun_render.cpp::RenderTile() Line 305-418
     pub fn get_or_create_texture(
         &mut self,
+        texture_creator: &TextureCreator<WindowContext>,
         micro_index: usize,
         rgba_data: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<&Texture<'a>> {
+    ) -> Result<&Texture<'static>> {
         // Check if texture already exists
         if !self.cache.contains_key(&micro_index) {
             // Create and upload exactly like Engine::draw_rgba_texture, then keep
             // the texture around for subsequent frames.
-            let mut texture = self
-                .texture_creator
+            let mut texture = texture_creator
                 .create_texture_static(PixelFormatEnum::ABGR8888, width, height)
                 .context("Failed to create SDL2 texture")?;
 
@@ -82,11 +77,17 @@ impl<'a> TextureCache<'a> {
             texture.set_blend_mode(BlendMode::Blend);
 
             // Cache the texture
+            let texture = unsafe { std::mem::transmute::<Texture<'_>, Texture<'static>>(texture) };
             self.cache.insert(micro_index, texture);
         }
 
         // Return cached texture
         Ok(self.cache.get(&micro_index).unwrap())
+    }
+
+    /// Get a cached texture without creating or uploading one.
+    pub fn get_texture(&self, micro_index: usize) -> Option<&Texture<'static>> {
+        self.cache.get(&micro_index)
     }
 
     /// Clear all cached textures
