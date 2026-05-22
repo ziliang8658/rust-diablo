@@ -1,4 +1,3 @@
-use crate::debug::RenderDebugFlags;
 use crate::engine::{Direction, Engine};
 use crate::entity::Entity;
 /// World module - Game world and level system
@@ -9,7 +8,9 @@ use crate::entity::Entity;
 /// - World rendering
 use crate::lighting::LightingSystem;
 use crate::math::{Point, Rect};
-use crate::renderer::{Camera, Color};
+use crate::renderer::{
+    Camera, Color, RenderPass, RenderPassPipeline, RenderPlan, RenderPolicy, RenderSceneContext,
+};
 use crate::resources::Palette;
 use crate::sprite::AnimationState;
 use crate::tiles::{texture_manager::TileTextureManager, MinData, SolData, TilData};
@@ -21,6 +22,7 @@ use std::sync::{
     Mutex,
 };
 use std::time::{Duration, Instant};
+use tracing::{debug, info};
 
 pub mod collision;
 pub mod dungeon_map;
@@ -903,8 +905,7 @@ pub struct World {
     // Step 6.4.1: Lighting system
     pub lighting: LightingSystem,
 
-    // Render debug flags (for controlling rendering phases)
-    pub render_debug: RenderDebugFlags,
+    render_plan: RenderPlan,
     require_entity_textures: bool,
     render_scratch: RefCell<RenderScratch>,
     skipped_foliage_cache: RefCell<HashSet<usize>>,
@@ -948,7 +949,7 @@ impl World {
         }
     }
 
-    fn record_render_perf(frame_perf: RenderPerfFrame, debug: &RenderDebugFlags) {
+    fn record_render_perf(frame_perf: RenderPerfFrame, render_plan: RenderPlan) {
         let now = Instant::now();
         let Ok(mut accumulator) = RENDER_PERF_ACCUMULATOR.lock() else {
             return;
@@ -969,7 +970,7 @@ impl World {
 
         let frames = accumulator.frames.max(1);
         let frames_f64 = frames as f64;
-        println!(
+        info!(
             "[render-perf] frames={} seconds={:.2} avg_world_ms={:.2} avg_floor_ms={:.2} avg_wall_ms={:.2} floor_tiles/frame={:.1} wall_scan/frame={:.1} wall_cells/frame={:.1} predraw/frame={:.1} micro_cache_hit/frame={:.1} micro_cache_miss/frame={:.1} foliage_cache_hit/frame={:.1} foliage_cache_miss/frame={:.1} texture_cache_size={} floor={} walls={} cam={} mask={}",
             frames,
             elapsed.as_secs_f64(),
@@ -985,10 +986,10 @@ impl World {
             accumulator.foliage_cache_hits as f64 / frames_f64,
             accumulator.foliage_cache_misses as f64 / frames_f64,
             accumulator.texture_cache_size,
-            debug.render_floor,
-            debug.render_walls,
-            debug.walking_camera_offset,
-            debug.mask_aware_draw_cell
+            render_plan.render_floor(),
+            render_plan.render_walls(),
+            render_plan.uses_walking_camera_offset(),
+            render_plan.mask_aware_draw_cell()
         );
 
         accumulator.reset(now);
@@ -1032,7 +1033,7 @@ impl World {
             texture_manager: None,
             dungeon_map: None,
             lighting,
-            render_debug: RenderDebugFlags::default(), // Default: floor-only mode (like C++)
+            render_plan: RenderPlan::default(),
             require_entity_textures: false,
             render_scratch: RefCell::new(RenderScratch::default()),
             skipped_foliage_cache: RefCell::new(HashSet::new()),
@@ -1042,6 +1043,10 @@ impl World {
     /// Require sprite entities to draw real textures instead of debug rectangles.
     pub fn require_entity_textures(&mut self) {
         self.require_entity_textures = true;
+    }
+
+    pub fn set_render_plan(&mut self, render_plan: RenderPlan) {
+        self.render_plan = render_plan;
     }
 
     /// Add an entity to the world
@@ -1174,7 +1179,7 @@ impl World {
             self.dungeon_map = Some(dungeon_map);
         }
 
-        println!("✓ Loaded Town sector: {}", dun_path);
+        info!("Loaded Town sector: {}", dun_path);
 
         self.min_data = Some(min_data);
         self.til_data = Some(til_data);
@@ -1211,10 +1216,13 @@ impl World {
 
     /// Render the world
     pub fn render(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
-        self.render_with_texture_manager(engine, camera)?;
-        // In isometric dungeon mode with the wall layer enabled, entities are drawn
-        // inside the DrawTileContent-style tile scan so foreground walls can cover them.
-        if self.dungeon_map.is_none() || !self.render_debug.render_walls {
+        let policy = RenderPolicy::from_plan(self.render_plan);
+        let pipeline = policy.pipeline(RenderSceneContext::new(self.dungeon_map.is_some()));
+
+        if pipeline.requires_dungeon_scan() {
+            self.render_with_texture_manager(engine, camera, policy.plan(), pipeline)?;
+        }
+        if pipeline.contains(RenderPass::EntityOverlay) {
             self.render_entities(engine, camera)?;
         }
 
@@ -1435,6 +1443,7 @@ impl World {
 
     fn render_entities_at_dpiece(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         camera: &Camera,
         dpiece_x: i32,
@@ -1443,7 +1452,7 @@ impl World {
         screen_y: i32,
         border_size: i32,
     ) -> Result<()> {
-        if !self.render_debug.render_entities {
+        if !render_plan.render_entities() {
             return Ok(());
         }
 
@@ -1547,6 +1556,7 @@ impl World {
 
     fn draw_tile_content_at(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         camera: &Camera,
         texture_mgr: &RefCell<TileTextureManager>,
@@ -1566,13 +1576,14 @@ impl World {
             .unwrap_or(crate::tiles::types::TileProperties::NONE);
 
         if let Some(frame) = trace_frame {
-            println!(
+            debug!(
                 "  [render-trace #{:06}] pass=cell-scan dpiece=({}, {}) piece={} is_floor={} props={:?} dst=({}, {})",
                 frame, dpiece_x, dpiece_y, level_piece_id, is_floor, tile_props, screen_x, screen_y
             );
         }
 
         self.draw_cell_at(
+            render_plan,
             engine,
             texture_mgr,
             level_piece_id,
@@ -1585,6 +1596,7 @@ impl World {
             trace_frame,
         )?;
         self.render_entities_at_dpiece(
+            render_plan,
             engine,
             camera,
             dpiece_x,
@@ -1598,7 +1610,13 @@ impl World {
     /// Render using TileTextureManager with proper tile decoding (Step 6.2)
     ///
     /// # Reference
-    fn render_with_texture_manager(&self, engine: &mut Engine, camera: &Camera) -> Result<()> {
+    fn render_with_texture_manager(
+        &self,
+        engine: &mut Engine,
+        camera: &Camera,
+        render_plan: RenderPlan,
+        pipeline: RenderPassPipeline,
+    ) -> Result<()> {
         let render_start = Instant::now();
         let mut perf = RenderPerfFrame::default();
         let texture_mgr_cell = self.texture_manager.as_ref().unwrap();
@@ -1630,19 +1648,14 @@ impl World {
             (25 - BORDER_SIZE, 25 - BORDER_SIZE) // Convert from dPiece to world if needed
         };
 
-        // Debug: focus render to the 2x2 region around the view center (in dPiece coordinates).
-        // This is intentionally simple (skip outside tiles) to help isolate rendering issues.
-        // Toggle focus via Shift+F7 (RenderDebugFlags.focus_render_2x2).
-        let focus_render_2x2 = self.render_debug.focus_render_2x2;
-        let log_render_focus = self.render_debug.log_render_focus && focus_render_2x2;
-        let render_focus = if focus_render_2x2 {
+        let render_focus = if render_plan.focus_2x2() {
             RenderFocus::centered_2x2(view_x, view_y, BORDER_SIZE)
         } else {
             RenderFocus::disabled()
         };
-        let trace_frame = Self::next_render_focus_trace_frame(log_render_focus);
+        let trace_frame = Self::next_render_focus_trace_frame(render_plan.trace_focus());
         if let Some(frame) = trace_frame {
-            println!(
+            debug!(
                 "[render-trace #{:06}] view_world=({}, {}) focus_dpiece_x=[{}..{}] focus_dpiece_y=[{}..{}]",
                 frame,
                 view_x,
@@ -1657,7 +1670,7 @@ impl World {
         let walking_player = self
             .entities
             .first()
-            .filter(|player| self.render_debug.walking_camera_offset && player.walking);
+            .filter(|player| render_plan.uses_walking_camera_offset() && player.walking);
         let walking_direction = walking_player.map(|player| player.render_direction());
         let walking_camera_offset = walking_player
             .map(|player| player.walking_render_offset())
@@ -1670,7 +1683,7 @@ impl World {
             walking_camera_offset,
         );
         if let Some(frame) = trace_frame {
-            println!(
+            debug!(
                 "[render-trace #{:06}] scan start_tile=({}, {}) tile_offset=({}, {}) columns={} rows={} walking_dir={:?} walking_offset=({}, {}) cam={}",
                 frame,
                 scan.start_tile.x,
@@ -1682,7 +1695,7 @@ impl World {
                 walking_direction,
                 walking_camera_offset.x,
                 walking_camera_offset.y,
-                if self.render_debug.walking_camera_offset { "ON" } else { "OFF" }
+                render_plan.camera_label()
             );
         }
 
@@ -1693,213 +1706,217 @@ impl World {
         let start_tile_x = scan.start_tile.x;
         let start_tile_y = scan.start_tile.y;
 
-        // === Phase 1: Draw Floor (like C++ DrawFloor) ===
-        // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1306-1308
-        // Render all floor tiles in the view (only if render_floor is enabled)
-        if self.render_debug.render_floor {
-            let floor_start = Instant::now();
-            let mut tile_x = start_tile_x;
-            let mut tile_y = start_tile_y;
-            let mut screen_x = offset_x;
-            let mut screen_y = offset_y;
-            let mut current_columns = columns;
+        for pass in pipeline.iter() {
+            match pass {
+                RenderPass::DungeonFloor => {
+                    let floor_start = Instant::now();
+                    let mut tile_x = start_tile_x;
+                    let mut tile_y = start_tile_y;
+                    let mut screen_x = offset_x;
+                    let mut screen_y = offset_y;
+                    let mut current_columns = columns;
 
-            for row in 0..rows {
-                let mut tx = tile_x;
-                let mut ty = tile_y;
-                let mut sx = screen_x;
-                let col_count = current_columns;
+                    for row in 0..rows {
+                        let mut tx = tile_x;
+                        let mut ty = tile_y;
+                        let mut sx = screen_x;
+                        let col_count = current_columns;
 
-                for _col in 0..col_count {
-                    // Convert world coordinates to dPiece coordinates for array access
-                    let dpiece_x = tx + BORDER_SIZE;
-                    let dpiece_y = ty + BORDER_SIZE;
+                        for _col in 0..col_count {
+                            // Convert world coordinates to dPiece coordinates for array access
+                            let dpiece_x = tx + BORDER_SIZE;
+                            let dpiece_y = ty + BORDER_SIZE;
 
-                    if !render_focus.contains(dpiece_x, dpiece_y) {
-                        tx += 1;
-                        ty -= 1;
-                        sx += 64;
-                        continue;
-                    }
-                    if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
-                        let level_piece_id = dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
-                        // Check IsFloor
-                        let is_floor = Self::is_floor(sol_data, level_piece_id);
-
-                        // Render the tile (frame 311 filtering is done in render_micro_tile)
-                        if is_floor {
-                            if let Some(frame) = trace_frame {
-                                println!(
-                                    "  [render-trace #{:06}] pass=floor-scan dpiece=({}, {}) piece={} dst=({}, {})",
-                                    frame, dpiece_x, dpiece_y, level_piece_id, sx, screen_y
-                                );
+                            if !render_focus.contains(dpiece_x, dpiece_y) {
+                                tx += 1;
+                                ty -= 1;
+                                sx += 64;
+                                continue;
                             }
-                            let _ = self.draw_floor_at(
-                                engine,
-                                texture_mgr_cell,
-                                level_piece_id,
-                                sx,
-                                screen_y,
-                                dpiece_x,
-                                dpiece_y,
-                                trace_frame,
-                            );
-                            perf.floor_tiles += 1;
-                        }
-                    }
+                            if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+                                let level_piece_id =
+                                    dungeon_map.get_piece(dpiece_x, dpiece_y) as usize;
+                                // Check IsFloor
+                                let is_floor = Self::is_floor(sol_data, level_piece_id);
 
-                    tx += 1;
-                    ty -= 1;
-                    sx += 64;
-                }
-
-                screen_y += TILE_HEIGHT / 2;
-
-                if (row & 1) != 0 {
-                    tile_x += 1;
-                    current_columns -= 1;
-                    screen_x += TILE_WIDTH / 2;
-                } else {
-                    tile_y += 1;
-                    current_columns += 1;
-                    screen_x -= TILE_WIDTH / 2;
-                }
-            }
-            perf.floor_time = floor_start.elapsed();
-        }
-
-        // === Phase 2: Draw Walls/Cells (like C++ DrawTileContent/DrawCell) ===
-        // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1311-1313
-        // After rendering all floors, render ALL tiles' walls and upper layers
-        // NOTE: Original C++ DrawTileContent renders ALL tiles, not just walls!
-        // Only render if render_walls is enabled
-        if self.render_debug.render_walls {
-            let wall_start = Instant::now();
-            // Match C++ DrawTileContent(): rows += MicroTileLen.
-            // Town uses 16 micro blocks per piece, so 8 rows loses tall house roots at viewport edges.
-            let blocks_per_piece = texture_mgr_cell.borrow().blocks_per_piece();
-            let wall_rows = wall_content_rows(rows, blocks_per_piece);
-            let wall_padding = wall_content_scan_padding();
-
-            // Reset to starting position
-            let mut wall_tile_x = start_tile_x + wall_padding.tile_shift.x;
-            let mut wall_tile_y = start_tile_y + wall_padding.tile_shift.y;
-            let mut wall_screen_x = offset_x + wall_padding.screen_x_shift;
-            let mut wall_screen_y = offset_y;
-            let mut wall_current_columns = columns + wall_padding.extra_columns;
-
-            for row in 0..wall_rows {
-                let mut tx = wall_tile_x;
-                let mut ty = wall_tile_y;
-                let mut sx = wall_screen_x;
-                let mut skip = false;
-
-                for _col in 0..wall_current_columns {
-                    // Convert world coordinates to dPiece coordinates for array access
-                    let dpiece_x = tx + BORDER_SIZE;
-                    let dpiece_y = ty + BORDER_SIZE;
-
-                    if !render_focus.contains(dpiece_x, dpiece_y) {
-                        skip = false;
-                        tx += 1;
-                        ty -= 1;
-                        sx += 64;
-                        continue;
-                    }
-
-                    if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
-                        perf.wall_scan_tiles += 1;
-                        let mut skip_next = false;
-
-                        if self.render_debug.wall_predraw
-                            && Self::should_predraw_east_wall_content(
-                                sol_data,
-                                dungeon_map,
-                                dpiece_x,
-                                dpiece_y,
-                                sx,
-                                screen_width,
-                            )
-                        {
-                            let behind_x = dpiece_x + 1;
-                            let behind_y = dpiece_y - 1;
-
-                            if render_focus.contains(behind_x, behind_y) {
-                                // C++ DrawTileContent renders the tile behind this wall first,
-                                // then skips it when the row scan reaches it normally.
-                                self.draw_tile_content_at(
-                                    engine,
-                                    camera,
-                                    texture_mgr_cell,
-                                    dungeon_map,
-                                    sol_data,
-                                    behind_x,
-                                    behind_y,
-                                    sx + TILE_WIDTH,
-                                    wall_screen_y,
-                                    BORDER_SIZE,
-                                    trace_frame,
-                                )?;
-                                perf.predraw_cells += 1;
-                                skip_next = true;
-                                if let Some(frame) = trace_frame {
-                                    println!(
-                                        "  [render-trace #{:06}] pass=wall-predraw source_dpiece=({}, {}) predraw_dpiece=({}, {}) dst=({}, {}) skip_next=true",
-                                        frame,
+                                // Render the tile (frame 311 filtering is done in render_micro_tile)
+                                if is_floor {
+                                    if let Some(frame) = trace_frame {
+                                        debug!(
+                                            "  [render-trace #{:06}] pass=floor-scan dpiece=({}, {}) piece={} dst=({}, {})",
+                                            frame, dpiece_x, dpiece_y, level_piece_id, sx, screen_y
+                                        );
+                                    }
+                                    let _ = self.draw_floor_at(
+                                        render_plan,
+                                        engine,
+                                        texture_mgr_cell,
+                                        level_piece_id,
+                                        sx,
+                                        screen_y,
                                         dpiece_x,
                                         dpiece_y,
-                                        behind_x,
-                                        behind_y,
-                                        sx + TILE_WIDTH,
-                                        wall_screen_y
+                                        trace_frame,
                                     );
+                                    perf.floor_tiles += 1;
                                 }
                             }
+
+                            tx += 1;
+                            ty -= 1;
+                            sx += 64;
                         }
 
-                        if !skip {
-                            self.draw_tile_content_at(
-                                engine,
-                                camera,
-                                texture_mgr_cell,
-                                dungeon_map,
-                                sol_data,
-                                dpiece_x,
-                                dpiece_y,
-                                sx,
-                                wall_screen_y,
-                                BORDER_SIZE,
-                                trace_frame,
-                            )?;
-                            perf.wall_cells += 1;
-                        }
+                        screen_y += TILE_HEIGHT / 2;
 
-                        skip = skip_next;
+                        if (row & 1) != 0 {
+                            tile_x += 1;
+                            current_columns -= 1;
+                            screen_x += TILE_WIDTH / 2;
+                        } else {
+                            tile_y += 1;
+                            current_columns += 1;
+                            screen_x -= TILE_WIDTH / 2;
+                        }
                     }
-
-                    tx += 1;
-                    ty -= 1;
-                    sx += 64;
+                    perf.floor_time = floor_start.elapsed();
                 }
+                RenderPass::DungeonWallContent => {
+                    // === Phase 2: Draw Walls/Cells (like C++ DrawTileContent/DrawCell) ===
+                    // Reference: Source/engine/render/scrollrt.cpp::DrawGame() Line 1311-1313
+                    // After rendering all floors, render ALL tiles' walls and upper layers
+                    // NOTE: Original C++ DrawTileContent renders ALL tiles, not just walls!
+                    let wall_start = Instant::now();
+                    // Match C++ DrawTileContent(): rows += MicroTileLen.
+                    // Town uses 16 micro blocks per piece, so 8 rows loses tall house roots at viewport edges.
+                    let blocks_per_piece = texture_mgr_cell.borrow().blocks_per_piece();
+                    let wall_rows = wall_content_rows(rows, blocks_per_piece);
+                    let wall_padding = wall_content_scan_padding();
 
-                wall_screen_y += TILE_HEIGHT / 2;
+                    // Reset to starting position
+                    let mut wall_tile_x = start_tile_x + wall_padding.tile_shift.x;
+                    let mut wall_tile_y = start_tile_y + wall_padding.tile_shift.y;
+                    let mut wall_screen_x = offset_x + wall_padding.screen_x_shift;
+                    let mut wall_screen_y = offset_y;
+                    let mut wall_current_columns = columns + wall_padding.extra_columns;
 
-                if (row & 1) != 0 {
-                    wall_tile_x += 1;
-                    wall_current_columns -= 1;
-                    wall_screen_x += TILE_WIDTH / 2;
-                } else {
-                    wall_tile_y += 1;
-                    wall_current_columns += 1;
-                    wall_screen_x -= TILE_WIDTH / 2;
+                    for row in 0..wall_rows {
+                        let mut tx = wall_tile_x;
+                        let mut ty = wall_tile_y;
+                        let mut sx = wall_screen_x;
+                        let mut skip = false;
+
+                        for _col in 0..wall_current_columns {
+                            // Convert world coordinates to dPiece coordinates for array access
+                            let dpiece_x = tx + BORDER_SIZE;
+                            let dpiece_y = ty + BORDER_SIZE;
+
+                            if !render_focus.contains(dpiece_x, dpiece_y) {
+                                skip = false;
+                                tx += 1;
+                                ty -= 1;
+                                sx += 64;
+                                continue;
+                            }
+
+                            if dungeon_map.in_bounds(dpiece_x, dpiece_y) {
+                                perf.wall_scan_tiles += 1;
+                                let mut skip_next = false;
+
+                                if render_plan.uses_wall_predraw()
+                                    && Self::should_predraw_east_wall_content(
+                                        sol_data,
+                                        dungeon_map,
+                                        dpiece_x,
+                                        dpiece_y,
+                                        sx,
+                                        screen_width,
+                                    )
+                                {
+                                    let behind_x = dpiece_x + 1;
+                                    let behind_y = dpiece_y - 1;
+
+                                    if render_focus.contains(behind_x, behind_y) {
+                                        // C++ DrawTileContent renders the tile behind this wall first,
+                                        // then skips it when the row scan reaches it normally.
+                                        self.draw_tile_content_at(
+                                            render_plan,
+                                            engine,
+                                            camera,
+                                            texture_mgr_cell,
+                                            dungeon_map,
+                                            sol_data,
+                                            behind_x,
+                                            behind_y,
+                                            sx + TILE_WIDTH,
+                                            wall_screen_y,
+                                            BORDER_SIZE,
+                                            trace_frame,
+                                        )?;
+                                        perf.predraw_cells += 1;
+                                        skip_next = true;
+                                        if let Some(frame) = trace_frame {
+                                            debug!(
+                                                "  [render-trace #{:06}] pass=wall-predraw source_dpiece=({}, {}) predraw_dpiece=({}, {}) dst=({}, {}) skip_next=true",
+                                                frame,
+                                                dpiece_x,
+                                                dpiece_y,
+                                                behind_x,
+                                                behind_y,
+                                                sx + TILE_WIDTH,
+                                                wall_screen_y
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if !skip {
+                                    self.draw_tile_content_at(
+                                        render_plan,
+                                        engine,
+                                        camera,
+                                        texture_mgr_cell,
+                                        dungeon_map,
+                                        sol_data,
+                                        dpiece_x,
+                                        dpiece_y,
+                                        sx,
+                                        wall_screen_y,
+                                        BORDER_SIZE,
+                                        trace_frame,
+                                    )?;
+                                    perf.wall_cells += 1;
+                                }
+
+                                skip = skip_next;
+                            }
+
+                            tx += 1;
+                            ty -= 1;
+                            sx += 64;
+                        }
+
+                        wall_screen_y += TILE_HEIGHT / 2;
+
+                        if (row & 1) != 0 {
+                            wall_tile_x += 1;
+                            wall_current_columns -= 1;
+                            wall_screen_x += TILE_WIDTH / 2;
+                        } else {
+                            wall_tile_y += 1;
+                            wall_current_columns += 1;
+                            wall_screen_x -= TILE_WIDTH / 2;
+                        }
+                    }
+                    perf.wall_time = wall_start.elapsed();
                 }
+                RenderPass::EntityOverlay => {}
             }
-            perf.wall_time = wall_start.elapsed();
         }
 
         perf.total_time = render_start.elapsed();
         perf.texture_cache_size = engine.tile_texture_cache_stats().0 as u64;
-        Self::record_render_perf(perf, &self.render_debug);
+        Self::record_render_perf(perf, render_plan);
         Ok(())
     }
 
@@ -1915,6 +1932,7 @@ impl World {
     /// clips it to the floor triangle footprint used by the original renderer.
     fn draw_floor_at(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -1928,6 +1946,7 @@ impl World {
 
         // Render block 0 (LeftTriangle) at screen_x
         self.render_floor_micro_tile(
+            render_plan,
             engine,
             texture_mgr,
             level_piece_id,
@@ -1942,6 +1961,7 @@ impl World {
 
         // Render block 1 (RightTriangle) at screen_x + 32
         self.render_floor_micro_tile(
+            render_plan,
             engine,
             texture_mgr,
             level_piece_id,
@@ -1967,6 +1987,7 @@ impl World {
     /// - TileType: TransparentSquare, height: 16
     fn render_floor_foliage(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -1984,7 +2005,7 @@ impl World {
             block_index,
             TileTextureKind::Foliage,
             DrawCellMask::Solid,
-            self.render_debug.toon_filter,
+            render_plan.toon_filter(),
         );
         let rect = Rect::new(screen_x, foliage_y, width, height);
 
@@ -1995,7 +2016,7 @@ impl World {
         if engine.draw_cached_texture(cache_key, rect)? {
             FOLIAGE_TEXTURE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             if let Some(frame) = trace_frame {
-                println!(
+                debug!(
                     "    [render-trace #{:06}] pass=foliage-cache-hit kind={:?} piece={} block={} dst=({}, {}) rect=({}, {}) size={}x{}",
                     frame,
                     TileTextureKind::Foliage,
@@ -2036,7 +2057,7 @@ impl World {
 
                 let texture_id = format!("foliage_{}_{}", level_piece_id, block_index);
                 if let Some(frame) = trace_frame {
-                    println!(
+                    debug!(
                         "    [render-trace #{:06}] pass=foliage kind={:?} piece={} block={} dst=({}, {}) rect=({}, {}) size={}x{}",
                         frame,
                         TileTextureKind::Foliage,
@@ -2070,6 +2091,7 @@ impl World {
     /// Original: `Source/engine/render/scrollrt.cpp::DrawCell()` Line 521-643
     fn draw_cell_at(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -2085,7 +2107,7 @@ impl World {
 
         let blocks_per_piece = texture_mgr.borrow().blocks_per_piece();
         let transparency = tile_props.contains(crate::tiles::types::TileProperties::TRANSPARENT);
-        let mask_aware = self.render_debug.mask_aware_draw_cell;
+        let mask_aware = render_plan.mask_aware_draw_cell();
 
         // Block 0 (left half)
         {
@@ -2107,6 +2129,7 @@ impl World {
                             {
                                 // Render foliage (grass)
                                 let _ = self.render_floor_foliage(
+                                    render_plan,
                                     engine,
                                     texture_mgr,
                                     level_piece_id,
@@ -2121,6 +2144,7 @@ impl World {
                                         .enabled(mask_aware);
                                 // Render normal tile
                                 let _ = self.render_micro_tile(
+                                    render_plan,
                                     engine,
                                     texture_mgr,
                                     level_piece_id,
@@ -2158,6 +2182,7 @@ impl World {
                             {
                                 // Render foliage (grass)
                                 let _ = self.render_floor_foliage(
+                                    render_plan,
                                     engine,
                                     texture_mgr,
                                     level_piece_id,
@@ -2172,6 +2197,7 @@ impl World {
                                         .enabled(mask_aware);
                                 // Render normal tile
                                 let _ = self.render_micro_tile(
+                                    render_plan,
                                     engine,
                                     texture_mgr,
                                     level_piece_id,
@@ -2199,6 +2225,7 @@ impl World {
         let mut y = screen_y - TILE_HEIGHT;
         for i in (2..blocks_per_piece).step_by(2) {
             self.render_micro_tile(
+                render_plan,
                 engine,
                 texture_mgr,
                 level_piece_id,
@@ -2212,6 +2239,7 @@ impl World {
             )?;
             if i + 1 < blocks_per_piece {
                 self.render_micro_tile(
+                    render_plan,
                     engine,
                     texture_mgr,
                     level_piece_id,
@@ -2236,6 +2264,7 @@ impl World {
     /// Original: `Source/engine/render/dun_render.cpp::RenderTile()`
     fn render_micro_tile(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -2248,6 +2277,7 @@ impl World {
         trace_frame: Option<u64>,
     ) -> Result<()> {
         self.render_micro_tile_with_kind(
+            render_plan,
             engine,
             texture_mgr,
             level_piece_id,
@@ -2265,6 +2295,7 @@ impl World {
 
     fn render_floor_micro_tile(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -2277,6 +2308,7 @@ impl World {
         trace_frame: Option<u64>,
     ) -> Result<()> {
         self.render_micro_tile_with_kind(
+            render_plan,
             engine,
             texture_mgr,
             level_piece_id,
@@ -2294,6 +2326,7 @@ impl World {
 
     fn render_micro_tile_with_kind(
         &self,
+        render_plan: RenderPlan,
         engine: &mut Engine,
         texture_mgr: &RefCell<TileTextureManager>,
         level_piece_id: usize,
@@ -2333,7 +2366,7 @@ impl World {
             block_index,
             texture_kind,
             mask,
-            self.render_debug.toon_filter,
+            render_plan.toon_filter(),
         );
         let rect_y = screen_y - height as i32 + 1;
         let rect = Rect::new(screen_x, rect_y, width, height);
@@ -2341,7 +2374,7 @@ impl World {
         if engine.draw_cached_texture(cache_key, rect)? {
             MICRO_TEXTURE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             if let Some(frame) = trace_frame {
-                println!(
+                debug!(
                     "    [render-trace #{:06}] pass=micro-cache-hit kind={:?} dpiece=({}, {}) piece={} block={} actual={:?} forced={:?} render={:?} mask={:?} dst=({}, {}) rect=({}, {}) size={}x{}",
                     frame,
                     texture_kind,
@@ -2427,7 +2460,7 @@ impl World {
                     return Ok(());
                 }
 
-                if self.render_debug.toon_filter {
+                if render_plan.toon_filter() {
                     let mut scratch = self.render_scratch.borrow_mut();
                     Self::apply_toon_filter(
                         &mut rgba_pixels,
@@ -2445,7 +2478,7 @@ impl World {
                     mask.cache_index()
                 );
                 if let Some(frame) = trace_frame {
-                    println!(
+                    debug!(
                         "    [render-trace #{:06}] pass=micro kind={:?} dpiece=({}, {}) piece={} block={} actual={:?} forced={:?} render={:?} mask={:?} dst=({}, {}) rect=({}, {}) size={}x{}",
                         frame,
                         texture_kind,

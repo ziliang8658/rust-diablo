@@ -1,4 +1,6 @@
 use crate::debug::RenderDebugFlags;
+#[cfg(any(debug_assertions, feature = "devtools"))]
+use crate::devtools;
 use crate::engine::{Direction, Engine, DEFAULT_SCREEN_HEIGHT, DEFAULT_SCREEN_WIDTH};
 use crate::entity::Entity;
 use crate::math::{Point, Rect};
@@ -13,6 +15,7 @@ use crate::world::{SimpleTown, World};
 /// It's the central coordinator for all game systems.
 use anyhow::{Context, Result};
 use std::time::Instant;
+use tracing::{debug, info};
 
 // Diablo's normal game speed is 20Hz and walk uses one tick per frame.
 const DEFAULT_WALK_FRAME_DURATION: f32 = 0.05;
@@ -908,7 +911,13 @@ impl Game {
     }
 
     /// Handle keyboard key press
-    fn handle_keydown(&mut self, keycode: sdl2::keyboard::Keycode, keymod: sdl2::keyboard::Mod) {
+    fn handle_keydown(&mut self, keycode: sdl2::keyboard::Keycode, _keymod: sdl2::keyboard::Mod) {
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        if devtools::handle_render_debug_key(&mut self.render_debug, keycode, _keymod) {
+            self.sync_render_plan();
+            return;
+        }
+
         match keycode {
             sdl2::keyboard::Keycode::Escape => {
                 self.running = false;
@@ -941,195 +950,6 @@ impl Game {
             }
             sdl2::keyboard::Keycode::F2 => {
                 self.switch_scene(SceneType::TownPreview);
-            }
-            // Render Debug: Toggle Floor Layer (Phase 1)
-            sdl2::keyboard::Keycode::F4 => {
-                self.render_debug.render_floor = !self.render_debug.render_floor;
-                println!(
-                    "\n🎨 === Render Debug: Floor Layer {} ===",
-                    if self.render_debug.render_floor {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                );
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle Wall Layer (Phase 2)
-            sdl2::keyboard::Keycode::F5 => {
-                self.render_debug.render_walls = !self.render_debug.render_walls;
-                println!(
-                    "\n🎨 === Render Debug: Wall Layer {} ===",
-                    if self.render_debug.render_walls {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                );
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle Entity Layer
-            sdl2::keyboard::Keycode::F6 => {
-                self.render_debug.render_entities = !self.render_debug.render_entities;
-                println!(
-                    "\n🎨 === Render Debug: Entity Layer {} ===",
-                    if self.render_debug.render_entities {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                );
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle Debug Overlay / Focus Render
-            sdl2::keyboard::Keycode::F7 => {
-                let shift = keymod
-                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
-                let ctrl = keymod
-                    .intersects(sdl2::keyboard::Mod::LCTRLMOD | sdl2::keyboard::Mod::RCTRLMOD);
-
-                if shift {
-                    self.render_debug.focus_render_2x2 = !self.render_debug.focus_render_2x2;
-                    println!(
-                        "\n🎨 === Render Debug: Focus Render 2x2 {} ===",
-                        if self.render_debug.focus_render_2x2 {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                } else if ctrl {
-                    self.render_debug.log_render_focus = !self.render_debug.log_render_focus;
-                    println!(
-                        "\n🎨 === Render Debug: Log Render Focus {} ===",
-                        if self.render_debug.log_render_focus {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                } else {
-                    self.render_debug.show_debug_overlay = !self.render_debug.show_debug_overlay;
-                    println!(
-                        "\n🎨 === Render Debug: Debug Overlay {} ===",
-                        if self.render_debug.show_debug_overlay {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                }
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle Toon/Comic Filter
-            sdl2::keyboard::Keycode::F10 => {
-                self.render_debug.toon_filter = !self.render_debug.toon_filter;
-                println!(
-                    "\n🎨 === Render Debug: Toon Filter {} ===",
-                    if self.render_debug.toon_filter {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                );
-                self.print_render_debug_status();
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle walking camera offset
-            sdl2::keyboard::Keycode::F11 => {
-                let shift = keymod
-                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
-
-                if shift {
-                    self.render_debug.log_walk_trace = !self.render_debug.log_walk_trace;
-                    println!(
-                        "\n=== Movement Debug: Walk Trace {} ===",
-                        if self.render_debug.log_walk_trace {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                } else {
-                    self.render_debug.walking_camera_offset =
-                        !self.render_debug.walking_camera_offset;
-                    println!(
-                        "\n=== Render Debug: Walking Camera Offset {} ===",
-                        if self.render_debug.walking_camera_offset {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                }
-                self.print_render_debug_status();
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Toggle x-axis wall pre-draw
-            sdl2::keyboard::Keycode::F12 => {
-                let shift = keymod
-                    .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
-
-                if shift {
-                    self.render_debug.mask_aware_draw_cell =
-                        !self.render_debug.mask_aware_draw_cell;
-                    println!(
-                        "\n=== Render Debug: Mask-aware DrawCell {} ===",
-                        if self.render_debug.mask_aware_draw_cell {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                } else {
-                    self.render_debug.wall_predraw = !self.render_debug.wall_predraw;
-                    println!(
-                        "\n馃帹 === Render Debug: Wall Pre-draw {} ===",
-                        if self.render_debug.wall_predraw {
-                            "ON"
-                        } else {
-                            "OFF"
-                        }
-                    );
-                }
-                self.print_render_debug_status();
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Reset All Layers
-            sdl2::keyboard::Keycode::F8 => {
-                self.render_debug = RenderDebugFlags {
-                    render_floor: true,
-                    render_walls: true,
-                    render_entities: true,
-                    show_debug_overlay: false,
-                    focus_render_2x2: false,
-                    log_render_focus: false,
-                    toon_filter: false,
-                    mask_aware_draw_cell: true,
-                    walking_camera_offset: false,
-                    log_walk_trace: false,
-                    wall_predraw: true,
-                };
-                println!("\n🎨 === Render Debug: All Layers RESET (All Enabled) ===");
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
-            }
-            // Render Debug: Set Floor Only Mode
-            sdl2::keyboard::Keycode::F9 => {
-                self.render_debug = RenderDebugFlags::floor_only();
-                println!("\n🎨 === Render Debug: Floor Only Mode ===");
-                self.print_render_debug_status();
-                // Sync with world
-                self.world.render_debug = self.render_debug.clone();
             }
             _ => {}
         }
@@ -1186,7 +1006,7 @@ impl Game {
             player.set_walk_frame_duration(self.walk_frame_duration);
         }
 
-        println!(
+        info!(
             "[movement] walk frame duration = {:.2}s, estimated 8-frame step = {:.2}s (PageUp faster, PageDown slower, Home reset to 20Hz original-ish)",
             self.walk_frame_duration,
             self.walk_frame_duration * 8.0
@@ -1270,104 +1090,6 @@ impl Game {
         } else {
             false
         }
-    }
-
-    /// Print render debug status (like C++ PrintStatus)
-    fn print_render_debug_status(&self) {
-        println!("┌─────────────────────────────────┐");
-        println!("│ Render Layer Status             │");
-        println!("├─────────────────────────────────┤");
-        println!(
-            "│ Floor Layer (F4):     {:5} │",
-            if self.render_debug.render_floor {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Wall Layer (F5):      {:5} │",
-            if self.render_debug.render_walls {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Entity Layer (F6):    {:5} │",
-            if self.render_debug.render_entities {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Debug Overlay (F7):    {:5} │",
-            if self.render_debug.show_debug_overlay {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Focus Render (S+F7):   {:5} │",
-            if self.render_debug.focus_render_2x2 {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Log Focus (C+F7):      {:5} │",
-            if self.render_debug.log_render_focus {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Toon Filter (F10):    {:5} │",
-            if self.render_debug.toon_filter {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ DrawCell Mask (S+F12): {:5} │",
-            if self.render_debug.mask_aware_draw_cell {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Walk Camera (F11):    {:5} │",
-            if self.render_debug.walking_camera_offset {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Walk Trace (S+F11):   {:5} │",
-            if self.render_debug.log_walk_trace {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!(
-            "│ Wall Pre-draw (F12):  {:5} │",
-            if self.render_debug.wall_predraw {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
-        println!("│ Reset All (F8)                  │");
-        println!("│ Floor Only (F9)                 │");
-        println!("└─────────────────────────────────┘");
     }
 
     /// Update game logic
@@ -1501,7 +1223,7 @@ impl Game {
             .unwrap_or(0.0);
         let walking_offset = player.walking_render_offset();
 
-        println!(
+        debug!(
             "[walk-trace #{:06}] raw_dt={:.4} update_dt={:.4} input={:?} mouse={} mouse_pos=({}, {}) was_walking={} start_pre={} start_post={} walking={} frame={} anim_prog={:.3} walk_prog={:.3} offset=({}, {}) tile=({}, {}) start={:?} target={:?} walk_dur={:.3} frame_dur={:.3} cam={}",
             self.walk_trace_frame,
             raw_dt,
@@ -1525,7 +1247,7 @@ impl Game {
             player.walk_target_tile,
             player.walk_duration,
             self.walk_frame_duration,
-            if self.render_debug.walking_camera_offset {
+            if self.render_debug.render_plan().uses_walking_camera_offset() {
                 "ON"
             } else {
                 "OFF"
@@ -1543,8 +1265,7 @@ impl Game {
     fn render(&mut self) -> Result<()> {
         self.engine.clear()?;
 
-        // Sync render_debug flags with world before rendering
-        self.world.render_debug = self.render_debug.clone();
+        self.sync_render_plan();
 
         // Render based on current scene
         match self.current_scene {
@@ -1575,22 +1296,27 @@ impl Game {
         let frames = self.render_frame_count;
         let fps = frames as f32 / seconds;
         let avg_frame_ms = seconds * 1000.0 / frames as f32;
+        let render_plan = self.render_debug.render_plan();
 
-        println!(
+        debug!(
             "[render-fps] frames={} seconds={:.2} fps={:.1} avg_frame_ms={:.2} scene={:?} focus={} trace={} cam={} mask={}",
             frames,
             seconds,
             fps,
             avg_frame_ms,
             self.current_scene,
-            self.render_debug.focus_render_2x2,
-            self.render_debug.log_render_focus,
-            self.render_debug.walking_camera_offset,
-            self.render_debug.mask_aware_draw_cell
+            render_plan.focus_2x2(),
+            render_plan.trace_focus(),
+            render_plan.uses_walking_camera_offset(),
+            render_plan.mask_aware_draw_cell()
         );
 
         self.render_frame_count = 0;
         self.render_fps_last_report = Instant::now();
+    }
+
+    fn sync_render_plan(&mut self) {
+        self.world.set_render_plan(self.render_debug.render_plan());
     }
 
     /// Switch to a different scene
@@ -1598,7 +1324,7 @@ impl Game {
     /// This method switches between different game scenes (TestWorld, TownPreview)
     fn switch_scene(&mut self, scene: SceneType) {
         if self.current_scene != scene {
-            println!("Switching scene: {:?} -> {:?}", self.current_scene, scene);
+            info!("Switching scene: {:?} -> {:?}", self.current_scene, scene);
             self.current_scene = scene;
 
             // Reset player walking state when switching scenes

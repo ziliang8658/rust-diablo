@@ -2,6 +2,10 @@
 ///
 /// This module contains debugging utilities, flags, and helpers
 /// for troubleshooting rendering and other game systems.
+use crate::renderer::{
+    DrawCellMode, PostEffects, RenderCameraMode, RenderLayers, RenderPlan, RenderRegionMode,
+    RenderTraceMode, WallOcclusionMode,
+};
 
 /// Rendering layer debug flags for troubleshooting rendering issues
 ///
@@ -54,6 +58,10 @@ impl Default for RenderDebugFlags {
 }
 
 impl RenderDebugFlags {
+    pub fn render_plan(&self) -> RenderPlan {
+        RenderPlan::from(self)
+    }
+
     /// Create debug flags with all layers enabled
     pub fn all_enabled() -> Self {
         Self {
@@ -103,5 +111,77 @@ impl RenderDebugFlags {
             log_walk_trace: false,
             wall_predraw: true,
         }
+    }
+}
+
+impl From<&RenderDebugFlags> for RenderPlan {
+    fn from(flags: &RenderDebugFlags) -> Self {
+        let region = if flags.focus_render_2x2 {
+            RenderRegionMode::Focus2x2
+        } else {
+            RenderRegionMode::Full
+        };
+        let trace = if flags.focus_render_2x2 && flags.log_render_focus {
+            RenderTraceMode::Focus
+        } else {
+            RenderTraceMode::Off
+        };
+        let camera = if flags.walking_camera_offset {
+            RenderCameraMode::WalkingOffset
+        } else {
+            RenderCameraMode::Fixed
+        };
+        let wall_occlusion = if flags.wall_predraw {
+            WallOcclusionMode::DiabloPredraw
+        } else {
+            WallOcclusionMode::Simple
+        };
+        let draw_cell = if flags.mask_aware_draw_cell {
+            DrawCellMode::DiabloMaskAware
+        } else {
+            DrawCellMode::RawUpload
+        };
+
+        RenderPlan::new(
+            RenderLayers::new(
+                flags.render_floor,
+                flags.render_walls,
+                flags.render_entities,
+            ),
+            region,
+            trace,
+            camera,
+            wall_occlusion,
+            draw_cell,
+            PostEffects::new(flags.toon_filter),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_flags_translate_to_render_plan() {
+        let mut flags = RenderDebugFlags::all_enabled();
+        flags.focus_render_2x2 = true;
+        flags.log_render_focus = true;
+        flags.walking_camera_offset = true;
+        flags.wall_predraw = false;
+        flags.mask_aware_draw_cell = false;
+        flags.toon_filter = true;
+
+        let plan = flags.render_plan();
+
+        assert!(plan.render_floor());
+        assert!(plan.render_walls());
+        assert!(plan.render_entities());
+        assert!(plan.focus_2x2());
+        assert!(plan.trace_focus());
+        assert!(plan.uses_walking_camera_offset());
+        assert!(!plan.uses_wall_predraw());
+        assert!(!plan.mask_aware_draw_cell());
+        assert!(plan.toon_filter());
     }
 }

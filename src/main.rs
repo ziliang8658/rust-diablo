@@ -1,5 +1,7 @@
 mod assets;
 mod debug;
+#[cfg(any(debug_assertions, feature = "devtools"))]
+mod devtools;
 mod engine;
 mod entity;
 /// Rust Diablo - A Rust rewrite of Diablo 1
@@ -18,6 +20,17 @@ mod world; // Step 6.3: Dungeon generation
 
 use anyhow::Result;
 use game::Game;
+use tracing_subscriber::EnvFilter;
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,rust_diablo=info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
 
 /// Run the game (exported for examples)
 pub fn run_game() -> Result<()> {
@@ -27,22 +40,10 @@ pub fn run_game() -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    println!("=== Rust Diablo - Step 6.1: Tiles System Demo ===");
-    println!("Controls:");
-    println!("  WASD / Arrow Keys - Move");
-    println!("  ESC - Quit");
-    println!("  F1 - Cathedral Dungeon (Step 6.1 Tiles System)");
-    println!("  F2 - Town Preview (Step 5.3)");
-    println!("\nRendering Debug (for troubleshooting):");
-    println!("  F4 - Toggle Floor Layer");
-    println!("  F5 - Toggle Wall Layer");
-    println!("  F6 - Toggle Entity Layer");
-    println!("  F7 - Toggle Debug Info");
-    println!("  F8 - Reset All Layers (All Enabled)");
-    println!("  F9 - Floor Only Mode (for debugging)");
-    println!("\nNote: Default mode is FLOOR ONLY for easier debugging.");
-    println!("      Press F8 to enable all layers for normal gameplay.");
-    println!("===============================================\n");
+    init_logging();
+
+    #[cfg(any(debug_assertions, feature = "devtools"))]
+    devtools::print_startup_help();
 
     run_game()
 }

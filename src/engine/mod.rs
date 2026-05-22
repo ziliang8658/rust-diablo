@@ -25,11 +25,15 @@ use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{Texture as SdlTexture, TextureCreator};
 use sdl2::video::WindowContext;
 use sdl2::Sdl;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::{debug, warn};
 
 /// Default gameplay viewport width.
 pub const DEFAULT_SCREEN_WIDTH: u32 = 640;
 /// Default gameplay viewport height without Diablo's bottom control panel.
 pub const DEFAULT_SCREEN_HEIGHT: u32 = 352;
+
+static TEXTURE_LOOKUP_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Engine structure that manages SDL2 and rendering
 pub struct Engine {
@@ -468,7 +472,7 @@ impl Engine {
                     registered_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to create texture for frame {}: {}", i, e);
+                    warn!("Failed to create texture for frame {}: {}", i, e);
                 }
             }
         }
@@ -512,7 +516,7 @@ impl Engine {
                     registered_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to load tile {}: {}", index, e);
+                    warn!("Failed to load tile {}: {}", index, e);
                 }
             }
 
@@ -793,13 +797,9 @@ impl Engine {
         src: Option<Rect>,
         dst: Rect,
     ) -> Result<bool> {
-        // DEBUG: Print first few texture lookups
-        static mut LOOKUP_COUNT: usize = 0;
-        unsafe {
-            LOOKUP_COUNT += 1;
-            if LOOKUP_COUNT <= 10 {
-                println!("  [draw_texture_by_id] Looking for: '{}'", texture_id);
-            }
+        let lookup_count = TEXTURE_LOOKUP_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if lookup_count <= 10 {
+            debug!(texture_id, "draw_texture_by_id lookup");
         }
 
         // Get texture reference and convert to static lifetime using raw pointer
@@ -808,19 +808,13 @@ impl Engine {
         let texture_ptr_opt: Option<*const SdlTexture> = {
             let texture_mgr = self.texture_manager();
 
-            // DEBUG: Check if texture exists
-            unsafe {
-                if LOOKUP_COUNT <= 10 {
-                    if texture_mgr.contains(texture_id) {
-                        println!("    ✓ Texture found in manager");
-                    } else {
-                        println!("    ✗ Texture NOT found in manager");
-                        println!(
-                            "    Available textures: {:?}",
-                            texture_mgr.textures.keys().take(5).collect::<Vec<_>>()
-                        );
-                    }
-                }
+            if lookup_count <= 10 {
+                debug!(
+                    texture_id,
+                    found = texture_mgr.contains(texture_id),
+                    available_textures = ?texture_mgr.textures.keys().take(5).collect::<Vec<_>>(),
+                    "texture manager lookup"
+                );
             }
 
             texture_mgr.get(texture_id).map(|t| {
