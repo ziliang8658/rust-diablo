@@ -309,19 +309,6 @@ impl TileTextureManager {
         println!("  MAX frame index in MIN: {}", max_frame_idx);
         println!("  Unique frame indices used: {}", frame_counts.len());
 
-        let total_frames = cel_sprite.frames.len()
-            + special_cel_sprite
-                .as_ref()
-                .map(|s| s.frames.len())
-                .unwrap_or(0);
-        if max_frame_idx >= total_frames {
-            println!(
-                "  ⚠️ WARNING: MIN references frame {} but only {} frames available!",
-                max_frame_idx, total_frames
-            );
-            println!("  ⚠️ Out-of-range frames will render as transparent");
-        }
-
         Ok(Self {
             cel_sprite,
             special_cel_sprite,

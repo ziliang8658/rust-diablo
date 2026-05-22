@@ -7,7 +7,6 @@ use crate::math::{Point, Rect};
 use crate::renderer::Camera;
 use crate::resources::{Cl2DirectionalSpriteSheet, MpqManager, Palette, PcxImage, ResourceManager};
 use crate::sprite::{Animation, AnimationState};
-use crate::tiles::{LevelCelBlock, MegaTile, MinData, SolData, TilData, TileProperties, TileType};
 use crate::world::{SimpleTown, World};
 /// Game module - Core game loop and state management
 ///
@@ -29,79 +28,6 @@ const RENDER_FPS_REPORT_INTERVAL_SECS: f32 = 1.0;
 
 fn capped_walk_update_dt(raw_dt: f32) -> f32 {
     raw_dt.min(WALK_UPDATE_DT_CAP)
-}
-
-/// Create simple test dungeon data with controlled frame indices
-///
-/// This creates a simple dungeon with:
-/// - Frame 1-6: Floor tiles (map to tile_0-5, 64x32)
-///
-/// Note: Wall tiles temporarily removed. Only floor rendering is active.
-fn create_test_dungeon_data() -> (MinData, TilData, SolData) {
-    // Create MicroTiles (MIN data)
-    // Frame indices: 1-6 = floors only
-    let mut micro_tiles = Vec::new();
-
-    // 0: Empty tile
-    micro_tiles.push(LevelCelBlock::new(0));
-
-    // 1-6: Floor tiles (various types)
-    for i in 1..=6 {
-        micro_tiles.push(LevelCelBlock::from_parts(TileType::Square, i));
-    }
-
-    // Note: Wall tiles (7-10) removed for simplification
-    // Will be re-implemented with proper architecture later
-
-    // Create PieceMicros - each piece contains 10 blocks (for Cathedral)
-    let pieces: Vec<crate::tiles::PieceMicros> = micro_tiles
-        .iter()
-        .map(|block| {
-            crate::tiles::PieceMicros {
-                mt: vec![*block; 10], // 10 blocks per piece for Cathedral
-            }
-        })
-        .collect();
-
-    let min_data = MinData {
-        pieces,
-        blocks_per_piece: 10,
-    };
-
-    // Create MegaTiles (TIL data) - combinations of MicroTiles
-    let mut mega_tiles = Vec::new();
-
-    // MegaTile 0: Empty
-    mega_tiles.push(MegaTile::default());
-
-    // MegaTile 1-6: Different floor patterns
-    for i in 1..=6 {
-        mega_tiles.push(MegaTile {
-            micro1: i as u16,
-            micro2: i as u16,
-            micro3: i as u16,
-            micro4: i as u16,
-        });
-    }
-
-    // Note: Wall MegaTiles (7-8) removed for simplification
-    // Currently only using floor tiles for rendering
-
-    let til_data = TilData { mega_tiles };
-
-    // Create SOL data (tile properties)
-    let mut sol_properties = vec![TileProperties::empty(); 7];
-
-    // All floor tiles (1-6) are walkable
-    for i in 1..=6 {
-        sol_properties[i] = TileProperties::empty();
-    }
-
-    let sol_data = SolData {
-        properties: sol_properties,
-    };
-
-    (min_data, til_data, sol_data)
 }
 
 fn load_directional_player_animation_set(
