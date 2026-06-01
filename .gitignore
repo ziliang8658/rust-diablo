@@ -3,6 +3,13 @@
 **/*.rs.bk
 Cargo.lock
 
+# Local commercial game assets
+assets/Diabdat.mpq
+assets/diabdat.mpq
+assets/**/*.mpq
+assets/extracted/
+assets/raw/
+
 # IDE
 .idea/
 .vscode/
